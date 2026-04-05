@@ -1,0 +1,117 @@
+﻿seed: 1337
+output_dir: runs/train_with_gan
+
+data:
+  dataset_root: dataset
+  manifest_path: dataset/manifest.jsonl
+  sample_artifact_mode: bundle
+  segment_seconds: 10.0
+  sequence_seconds: 34.0
+  stride_seconds: 8.0
+  latent_fps: 50
+  mono_probability: 0.05
+  downmix_probability: 0.05
+  cache_size: 16
+  shuffle_segments_within_epoch: true
+  batch_size: 4
+  num_workers: 8
+  prefetch_factor: 4
+  pin_memory: true
+  persistent_workers: true
+  drop_last: true
+
+model:
+  target_channels: 12
+  cond_channels: 1
+  latent_dim: 64
+  hidden_dim: 1024
+  num_layers: 12
+  num_heads: 16
+  mlp_ratio: 4.0
+  dropout: 0.0
+  timestep_embed_dim: 1024
+  timestep_scale: 1000.0
+  max_period: 10000.0
+  num_memory_tokens: 32
+
+training:
+  max_steps: 200000
+  grad_accum_steps: 4
+  mixed_precision: bf16
+  compile_model: true
+  compile_mode: max-autotune-no-cudagraphs
+  resume_from_checkpoint: null
+  init_from_checkpoint: runs/train/checkpoints/step_0200000
+  grad_clip_norm: 1.0
+  log_every: 20
+  checkpoint_every: 1000
+  max_checkpoints_to_keep: 5
+  num_epochs_hint: 1000
+  window_seconds: 10.0
+  overlap_seconds: 2.0
+  tbptt_windows: 0
+  sequence_seconds_choices: [10.0, 18.0, 26.0, 34.0]
+  randomize_sequence_per_batch: true
+  detach_memory: false
+  use_gan: true
+  gan_d_lr: 1.0e-4
+  gan_d_beta1: 0.0
+  gan_d_beta2: 0.9
+  gan_d_base_channels: 64
+  gan_d_num_layers: 4
+  gan_d_fine_layers: 3
+  gan_d_coarse_layers: 4
+  gan_d_use_spectral_norm: true
+  gan_use_mask_channel: true
+  gan_ms_w_fine: 1.0
+  gan_ms_w_coarse: 0.5
+  gan_lambda_adv: 1.0e-3
+  gan_adv_warmup_steps: 30000
+  gan_r1_gamma: 1.0
+  gan_r1_every: 16
+  routing_kl_weight: 0.015
+  routing_kl_temperature: 1.1
+  routing_kl_eps: 1.0e-6
+  corr_weight: 0.008
+  corr_eps: 1.0e-6
+  corr_offdiag_only: true
+  corr_use_correlation: true
+  scheduled_sampling_max_step_offset: 0
+  scheduled_sampling_probability: 0.0
+  scheduled_sampling_prob_start: null
+  scheduled_sampling_prob_end: null
+  scheduled_sampling_ramp_steps: 0
+  scheduled_sampling_start_step: 0
+  scheduled_sampling_ramp_shape: linear
+  scheduled_sampling_strategy: uniform
+  scheduled_sampling_sampler: heun
+  scheduled_sampling_reflexflow: null
+  scheduled_sampling_reflexflow_alpha: 1.0
+  scheduled_sampling_reflexflow_beta1: 10.0
+  scheduled_sampling_reflexflow_beta2: 1.0
+  run_validation: false
+  validation_dataset_root: dataset
+  validation_dataset_path: dataset/manifest.jsonl
+  validation_steps: 1000
+  run_validation_generations: false
+  num_valid_generations: 1
+  validation_generation_seed: 1337
+  validation_generation_input_path: dataset/validation_audio
+  validation_generation_output_path: runs/train_with_gan/validation_generations
+  validation_generation_vae_checkpoint_path: null
+  validation_generation_vae_config_path: null
+
+optimizer:
+  type: adamw
+  lr: 1.0e-4
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.99
+  eps: 1.0e-8
+  adamw_fused: true
+  adamw_foreach: false
+
+scheduler:
+  type: cosine
+  warmup_steps: 20000
+  min_lr: 1.0e-5
