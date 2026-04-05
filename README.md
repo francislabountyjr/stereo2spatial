@@ -39,6 +39,21 @@ If you also want lint, type-check, and test tooling:
 pip install -e .[dev]
 ```
 
+## EAR-VAE
+
+`stereo2spatial` uses EAR-VAE as the latent audio codec layer for training,
+validation generation, bundle export, and inference.
+
+EAR-VAE links:
+
+- Hugging Face: <https://huggingface.co/earlab/EAR_VAE>
+- GitHub: <https://github.com/Eps-Acoustic-Revolution-Lab/EAR_VAE>
+
+When you use an exported bundle such as `stereo2spatial-v1`, the required
+EAR-VAE assets can be bundled alongside the model. When you run directly from a
+training checkpoint or enable decoded validation generations during training,
+you should provide EAR-VAE checkpoint/config paths explicitly.
+
 ## Inference With stereo2spatial-v1
 
 Pretrained v1 bundle:
@@ -249,3 +264,11 @@ The exported bundle contains:
 
 - [configs/README.md](configs/README.md): config presets and tuning guide
 - [scripts/README.md](scripts/README.md): dataset, QC, Atmos, and export scripts
+
+## Acknowledgments
+
+Thanks to the EAR Lab team for open-sourcing EAR-VAE and making the latent
+audio codec stack available to the community.
+
+- EAR-VAE on Hugging Face: <https://huggingface.co/earlab/EAR_VAE>
+- EAR-VAE on GitHub: <https://github.com/Eps-Acoustic-Revolution-Lab/EAR_VAE>
