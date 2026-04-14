@@ -260,6 +260,21 @@ The exported bundle contains:
 - `scripts/`: dataset prep, QC, Atmos tooling, and bundle export helpers
 - `tests/`: unit tests covering config, inference, and training helpers
 
+## Future Work
+
+Promising next directions for the project include:
+
+- fine-tuning `EAR-VAE` for independent per-channel `7.1.4` spatial decoding.
+  The current VAE was trained around stereo encode/decode behavior rather than
+  decoding each spatial channel independently, so adaptation here may improve
+  decoded quality and better align output distributions.
+- scaling model capacity and training budget. That likely means a larger
+  backbone, more training steps, and potentially a larger dataset.
+- experimenting with explicit conditioning for mix style so the model can
+  better follow different spatial presentation preferences at inference time.
+- adding distributed training support across multiple GPUs and, eventually,
+  multiple nodes for larger-scale experiments.
+
 ## Related Docs
 
 - [docs/architecture.md](docs/architecture.md): architecture deep dive and
