@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage and setup docs
+    url: https://github.com/francislabountyjr/stereo2spatial#readme
+    about: Read the README for installation, training, inference, and bundle export guidance.
+  - name: Architecture and config reference
+    url: https://github.com/francislabountyjr/stereo2spatial/blob/main/docs/architecture.md
+    about: Review the architecture reference and config docs before filing design or usage questions.
+  - name: Security policy
+    url: https://github.com/francislabountyjr/stereo2spatial/security/policy
+    about: Report vulnerabilities privately and follow the repository security policy.

@@ -1,0 +1,96 @@
+name: Bug report
+description: Report a reproducible defect in training, inference, configs, or repo tooling.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for reproducible defects. For security issues, do not open a public issue; follow `SECURITY.md` instead.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I searched existing issues and pull requests for duplicates.
+          required: true
+        - label: I read the relevant docs in `README.md`, `configs/README.md`, or `docs/architecture.md`.
+          required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Training
+        - Inference
+        - Config loading or validation
+        - Dataset tooling
+        - Export bundles
+        - CI or developer tooling
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Briefly describe the failure and why it is a bug.
+      placeholder: The failure happens when...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include exact commands, config paths, and the smallest reproducible workflow.
+      placeholder: |
+        1. Run `python train.py --config ...`
+        2. Use checkpoint/config ...
+        3. Observe failure at ...
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: I expected...
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: Instead, the repo did...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or traceback
+      description: Paste the relevant error output or stack trace.
+      render: shell
+  - type: textarea
+    id: config_excerpt
+    attributes:
+      label: Config or input details
+      description: Include the relevant config fragment, checkpoint format, bundle layout, or dataset assumptions.
+      render: yaml
+  - type: input
+    id: commit
+    attributes:
+      label: Commit or version
+      description: Provide a commit SHA, branch name, or release tag if known.
+      placeholder: main @ abc1234
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Python version, accelerator/runtime details, and anything else relevant.
+      placeholder: Windows 11, Python 3.10.14, CUDA 12.4, RTX 4090
+    validations:
+      required: true

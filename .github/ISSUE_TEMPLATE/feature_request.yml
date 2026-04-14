@@ -1,0 +1,71 @@
+name: Feature request
+description: Propose an improvement to training, inference, configs, or repository workflow.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for concrete improvements. Start with the user or developer problem, then describe the proposed change.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I searched existing issues and pull requests for similar requests.
+          required: true
+        - label: I checked the current README and architecture/config docs to confirm this is not already supported.
+          required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - Training
+        - Inference
+        - Config schema
+        - Dataset tooling
+        - Export bundles
+        - CI or developer workflow
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What limitation, pain point, or missing capability are you trying to address?
+      placeholder: Today it is difficult to...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the change you want and how it would work at a high level.
+      placeholder: I would like the repo to...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workarounds or competing approaches you evaluated.
+      placeholder: I considered...
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact and tradeoffs
+      description: Note expected benefits, compatibility concerns, and whether configs, checkpoints, or bundles would be affected.
+      placeholder: This would help because...
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List the observable outcome that would make this request complete.
+      placeholder: |
+        - New CLI flag or config field exists
+        - Docs are updated
+        - Regression tests cover the new behavior
