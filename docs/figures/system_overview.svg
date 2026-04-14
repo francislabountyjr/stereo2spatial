@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1080" role="img" aria-labelledby="title desc">
+  <title id="title">stereo2spatial system overview</title>
+  <desc id="desc">A polished overview diagram covering offline latent creation, latent-space training, and inference.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f8fbff"/>
+      <stop offset="100%" stop-color="#eef4f8"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <style>
+      .title { font: 700 34px 'Segoe UI', Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 16px 'Segoe UI', Arial, sans-serif; fill: #475569; }
+      .section { font: 700 18px 'Segoe UI', Arial, sans-serif; fill: #0f172a; letter-spacing: 0.5px; }
+      .label { font: 700 15px 'Segoe UI', Arial, sans-serif; fill: #0f172a; }
+      .body { font: 400 13px 'Segoe UI', Arial, sans-serif; fill: #334155; }
+      .tiny { font: 400 12px 'Segoe UI', Arial, sans-serif; fill: #475569; }
+      .panel { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; rx: 24; filter: url(#shadow); }
+      .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.3; rx: 18; filter: url(#shadow); }
+      .data { fill: #e0f2fe; stroke: #0284c7; }
+      .codec { fill: #ccfbf1; stroke: #0f766e; }
+      .model { fill: #e0e7ff; stroke: #4338ca; }
+      .loss { fill: #fef3c7; stroke: #d97706; }
+      .gan { fill: #fee2e2; stroke: #dc2626; }
+      .out { fill: #dcfce7; stroke: #15803d; }
+      .tag { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.1; rx: 999; }
+      .arrow { fill: none; stroke: #475569; stroke-width: 2.4; marker-end: url(#arrow); }
+      .dash { fill: none; stroke: #94a3b8; stroke-width: 1.8; stroke-dasharray: 8 8; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1080" fill="url(#bg)"/>
+
+  <text x="70" y="70" class="title">stereo2spatial: System Overview</text>
+  <text x="70" y="100" class="subtitle">EAR-VAE handles latent I/O; SpatialDiT maps source latents to target spatial latents.</text>
+
+  <rect x="60" y="190" width="1480" height="250" class="panel"/>
+  <text x="90" y="225" class="section">A. Offline Latent Dataset Creation</text>
+  <text x="90" y="248" class="tiny">Training does not read raw WAVs directly. The repo precomputes EAR-VAE latent artifacts first.</text>
+
+  <rect x="95" y="275" width="220" height="118" class="box data"/>
+  <text x="115" y="302" class="label">Input Renders</text>
+  <text x="115" y="326" class="body">Target multichannel render</text>
+  <text x="115" y="346" class="tiny">Default export layout: 12 channels</text>
+  <text x="115" y="371" class="body">Stereo + mono/downmix views</text>
+
+  <rect x="380" y="262" width="255" height="146" class="box codec"/>
+  <text x="400" y="289" class="label">EAR-VAE Encoding</text>
+  <text x="400" y="314" class="body">Target: per-channel encode</text>
+  <text x="400" y="334" class="tiny">encode_channels_independent -&gt; [12, 64, T]</text>
+  <text x="400" y="362" class="body">Source: stereo / mono / downmix</text>
+  <text x="400" y="382" class="tiny">vae_encode -&gt; [1, 64, T]</text>
+
+  <rect x="705" y="262" width="330" height="146" class="box data"/>
+  <text x="725" y="289" class="label">Stored Sample Artifacts</text>
+  <text x="725" y="315" class="body">target_latent.pt or sample_bundle.pt</text>
+  <text x="725" y="337" class="body">source_stereo_latent.pt</text>
+  <text x="725" y="359" class="body">source_mono_latent.pt</text>
+  <text x="725" y="381" class="body">source_downmix_latent.pt</text>
+
+  <rect x="1105" y="262" width="390" height="146" class="box out"/>
+  <text x="1125" y="289" class="label">Manifest Metadata</text>
+  <text x="1125" y="314" class="body">Latents are stored in [C, D, T] layout</text>
+  <text x="1125" y="336" class="body">Default target: [12, 64, T]</text>
+  <text x="1125" y="358" class="body">Default conditioning: [1, 64, T]</text>
+  <text x="1125" y="380" class="body">latent_fps = 50, target layout = 7.1.4 order</text>
+
+  <path d="M 315 334 C 340 334, 350 334, 380 334" class="arrow"/>
+  <path d="M 635 334 C 660 334, 675 334, 705 334" class="arrow"/>
+  <path d="M 1035 334 C 1060 334, 1075 334, 1105 334" class="arrow"/>
+
+  <rect x="60" y="470" width="1480" height="295" class="panel"/>
+  <text x="90" y="505" class="section">B. Latent-Space Training</text>
+  <text x="90" y="528" class="tiny">The generator learns a target latent velocity field under flow matching, with recurrent memory tokens and optional GAN supervision.</text>
+
+  <rect x="92" y="565" width="250" height="148" class="box data"/>
+  <text x="112" y="592" class="label">Dataset Sample</text>
+  <text x="112" y="617" class="body">target_latent [B, 12, 64, T]</text>
+  <text x="112" y="639" class="body">cond_latent [B, 1, 64, T]</text>
+  <text x="112" y="661" class="body">valid_mask [B, T]</text>
+  <text x="112" y="689" class="tiny">Stage 1: strided crops</text>
+  <text x="112" y="708" class="tiny">Stage 2: full-song windows</text>
+
+  <rect x="392" y="548" width="310" height="182" class="box loss"/>
+  <text x="412" y="575" class="label">Flow-Matching State Construction</text>
+  <text x="412" y="602" class="body">Sample sigma, set t = 1 - sigma</text>
+  <text x="412" y="624" class="body">Draw z0 ~ N(0, I)</text>
+  <text x="412" y="646" class="body">zt = (1 - t) z0 + t z1</text>
+  <text x="412" y="668" class="body">target velocity = z1 - z0</text>
+  <text x="412" y="706" class="tiny">Stage 2 can roll zt from earlier source steps</text>
+
+  <rect x="752" y="548" width="350" height="182" class="box model"/>
+  <text x="772" y="575" class="label">SpatialDiT Generator</text>
+  <text x="772" y="602" class="body">Input: zt, z_cond, t, valid_mask</text>
+  <text x="772" y="624" class="body">Per-frame tokenization + position encoding</text>
+  <text x="772" y="646" class="body">12 transformer blocks with cross-attention</text>
+  <text x="772" y="668" class="body">32 memory tokens across windows</text>
+  <text x="772" y="697" class="tiny">Output: velocity prediction [B, 12, 64, T]</text>
+
+  <rect x="1152" y="533" width="350" height="212" class="box"/>
+  <text x="1172" y="560" class="label">Loss Stack</text>
+  <rect x="1176" y="580" width="302" height="46" class="box loss"/>
+  <text x="1196" y="609" class="body">Masked, frame-weighted FM velocity loss</text>
+  <rect x="1176" y="636" width="302" height="42" class="box loss"/>
+  <text x="1196" y="662" class="body">Optional routing KL + correlation losses</text>
+  <rect x="1176" y="688" width="302" height="42" class="box gan"/>
+  <text x="1196" y="714" class="body">Optional multi-scale PatchGAN branch</text>
+
+  <path d="M 342 639 C 362 639, 368 639, 392 639" class="arrow"/>
+  <path d="M 702 639 C 722 639, 728 639, 752 639" class="arrow"/>
+  <path d="M 1102 639 C 1122 639, 1128 639, 1152 639" class="arrow"/>
+
+  <rect x="60" y="795" width="1480" height="235" class="panel"/>
+  <text x="90" y="830" class="section">C. Inference</text>
+  <text x="90" y="853" class="tiny">Inference reads an exported bundle or a training checkpoint, generates target latents from noise, then decodes them back to audio.</text>
+
+  <rect x="95" y="882" width="225" height="105" class="box data"/>
+  <text x="115" y="909" class="label">Input Audio</text>
+  <text x="115" y="934" class="body">Mono or stereo WAV</text>
+  <text x="115" y="956" class="body">Read + resample to 48 kHz</text>
+
+  <rect x="370" y="882" width="250" height="105" class="box codec"/>
+  <text x="390" y="909" class="label">EAR-VAE Encode</text>
+  <text x="390" y="934" class="body">Conditioning latent [1, 64, T]</text>
+  <text x="390" y="956" class="body">Chunked encode for long audio</text>
+
+  <rect x="670" y="867" width="390" height="135" class="box model"/>
+  <text x="690" y="894" class="label">SpatialDiT Sampling</text>
+  <text x="690" y="919" class="body">Sample z0; solve from t = 0 to t = 1</text>
+  <text x="690" y="941" class="body">Chunked overlap-add with Heun / Euler / UniPC</text>
+  <text x="690" y="963" class="body">Memory updates once per accepted chunk</text>
+  <text x="690" y="985" class="tiny">Output latent: [12, 64, T]</text>
+
+  <rect x="1110" y="882" width="230" height="105" class="box codec"/>
+  <text x="1130" y="909" class="label">Per-Channel Decode</text>
+  <text x="1130" y="934" class="body">Decode each channel independently</text>
+  <text x="1130" y="956" class="body">Stereo decode -&gt; mono channel</text>
+
+  <rect x="1390" y="882" width="115" height="105" class="box out"/>
+  <text x="1410" y="909" class="label">Output</text>
+  <text x="1410" y="934" class="body">12-ch WAV</text>
+  <text x="1410" y="956" class="tiny">7.1.4 order</text>
+
+  <path d="M 320 934 C 340 934, 346 934, 370 934" class="arrow"/>
+  <path d="M 620 934 C 640 934, 646 934, 670 934" class="arrow"/>
+  <path d="M 1060 934 C 1080 934, 1086 934, 1110 934" class="arrow"/>
+  <path d="M 1340 934 C 1360 934, 1366 934, 1390 934" class="arrow"/>
+
+</svg>

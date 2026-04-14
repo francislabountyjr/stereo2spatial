@@ -262,6 +262,8 @@ The exported bundle contains:
 
 ## Related Docs
 
+- [docs/architecture.md](docs/architecture.md): architecture deep dive and
+  system diagrams
 - [configs/README.md](configs/README.md): config presets and tuning guide
 - [scripts/README.md](scripts/README.md): dataset, QC, Atmos, and export scripts
 

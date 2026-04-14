@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">SpatialDiT backbone</title>
+  <desc id="desc">Detailed architecture diagram of the SpatialDiT latent generator with tokenization, memory tokens, and transformer block internals.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7fbff"/>
+      <stop offset="100%" stop-color="#edf2f7"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <style>
+      .title { font: 700 34px 'Segoe UI', Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 16px 'Segoe UI', Arial, sans-serif; fill: #475569; }
+      .section { font: 700 18px 'Segoe UI', Arial, sans-serif; fill: #0f172a; letter-spacing: 0.5px; }
+      .label { font: 700 15px 'Segoe UI', Arial, sans-serif; fill: #0f172a; }
+      .body { font: 400 13px 'Segoe UI', Arial, sans-serif; fill: #334155; }
+      .tiny { font: 400 12px 'Segoe UI', Arial, sans-serif; fill: #475569; }
+      .panel { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; rx: 24; filter: url(#shadow); }
+      .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.3; rx: 18; filter: url(#shadow); }
+      .data { fill: #e0f2fe; stroke: #0284c7; }
+      .cond { fill: #ccfbf1; stroke: #0f766e; }
+      .model { fill: #e0e7ff; stroke: #4338ca; }
+      .time { fill: #fef3c7; stroke: #d97706; }
+      .note { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.1; rx: 18; }
+      .arrow { fill: none; stroke: #475569; stroke-width: 2.4; marker-end: url(#arrow); }
+      .dash { fill: none; stroke: #94a3b8; stroke-width: 1.8; stroke-dasharray: 8 8; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" fill="url(#bg)"/>
+
+  <text x="70" y="68" class="title">SpatialDiT Backbone</text>
+  <text x="70" y="98" class="subtitle">A conditional latent vector-field transformer with explicit timestep modulation, cross-attention conditioning, and recurrent memory tokens.</text>
+
+  <rect x="60" y="130" width="1480" height="320" class="panel"/>
+  <text x="90" y="165" class="section">A. Input Interface and Tokenization</text>
+
+  <rect x="92" y="203" width="225" height="115" class="box data"/>
+  <text x="112" y="230" class="label">Noised Target State</text>
+  <text x="112" y="255" class="body">zt [B, 12, 64, T]</text>
+  <text x="112" y="277" class="body">Flatten per frame: 12 x 64 = 768</text>
+  <text x="112" y="299" class="tiny">Target stream carries memory prefix.</text>
+
+  <rect x="365" y="203" width="245" height="115" class="box cond"/>
+  <text x="385" y="230" class="label">Conditioning Latent</text>
+  <text x="385" y="255" class="body">z_cond [B, 1, 64, T]</text>
+  <text x="385" y="277" class="body">Flatten per frame: 1 x 64 = 64</text>
+  <text x="385" y="299" class="tiny">Used for FiLM and cross-attention KV.</text>
+
+  <rect x="658" y="203" width="220" height="115" class="box time"/>
+  <text x="678" y="230" class="label">Flow Timestep</text>
+  <text x="678" y="255" class="body">t [B]</text>
+  <text x="678" y="277" class="body">Sinusoidal embedding dim = 1024</text>
+  <text x="678" y="299" class="tiny">Scaled by timestep_scale = 1000.</text>
+
+  <rect x="927" y="203" width="270" height="115" class="box model"/>
+  <text x="947" y="230" class="label">Input Projections</text>
+  <text x="947" y="255" class="body">target_in: 768 -&gt; 1024</text>
+  <text x="947" y="277" class="body">cond_in: 64 -&gt; 1024</text>
+  <text x="947" y="299" class="tiny">Shared frame positional encoding.</text>
+
+  <rect x="1245" y="203" width="250" height="115" class="box model"/>
+  <text x="1265" y="230" class="label">Memory Prefix</text>
+  <text x="1265" y="255" class="body">Learned mem_init [32, 1024]</text>
+  <text x="1265" y="277" class="body">Expanded to [B, 32, 1024]</text>
+  <text x="1265" y="299" class="tiny">Prepended to x stream only.</text>
+
+  <path d="M 317 260 C 335 260, 344 260, 365 260" class="arrow"/>
+  <path d="M 610 260 C 628 260, 637 260, 658 260" class="arrow"/>
+  <path d="M 878 260 C 896 260, 905 260, 927 260" class="arrow"/>
+  <path d="M 1197 260 C 1215 260, 1224 260, 1245 260" class="arrow"/>
+
+  <rect x="120" y="355" width="1360" height="68" class="note"/>
+  <text x="145" y="383" class="body">After tokenization:</text>
+  <text x="265" y="383" class="body">x_tokens [B, T, 1024]</text>
+  <text x="470" y="383" class="body">cond_tokens [B, T, 1024]</text>
+  <text x="710" y="383" class="body">time_context [B, 1024]</text>
+  <text x="935" y="383" class="body">x_all [B, 32 + T, 1024]</text>
+  <text x="1180" y="376" class="tiny">
+    <tspan x="1180" dy="0">valid_mask -&gt; keep/pad masks</tspan>
+    <tspan x="1180" dy="15">with memory prefix</tspan>
+  </text>
+
+  <rect x="60" y="485" width="1480" height="430" class="panel"/>
+  <text x="90" y="520" class="section">B. Core Processing: 12 Transformer Blocks</text>
+
+  <rect x="95" y="565" width="330" height="280" class="box model"/>
+  <text x="115" y="592" class="label">Block Stack</text>
+  <text x="115" y="618" class="body">Repeat TransformerBlock x 12</text>
+  <text x="115" y="640" class="body">Each block sees:</text>
+  <text x="135" y="664" class="body">x stream with memory + frame tokens</text>
+  <text x="135" y="686" class="body">conditioning stream without memory prefix</text>
+  <text x="135" y="708" class="body">time-context vector for AdaLN</text>
+
+  <rect x="460" y="548" width="710" height="315" class="box"/>
+  <text x="485" y="578" class="label">One TransformerBlock</text>
+
+  <rect x="490" y="608" width="190" height="210" class="box model"/>
+  <text x="510" y="635" class="label">1. Self-Attention</text>
+  <text x="510" y="660" class="body">RMSNorm(x)</text>
+  <text x="510" y="682" class="body">Time AdaLN(scale, shift)</text>
+  <text x="510" y="704" class="body">Cond FiLM(scale, shift)</text>
+  <text x="510" y="726" class="body">MHA(Q = K = V = x)</text>
+  <text x="510" y="754" class="tiny">Memory tokens in x stream.</text>
+
+  <rect x="720" y="608" width="190" height="210" class="box cond"/>
+  <text x="740" y="635" class="label">2. Cross-Attention</text>
+  <text x="740" y="660" class="body">RMSNorm(x) -&gt; query</text>
+  <text x="740" y="682" class="body">Time AdaLN(scale, shift)</text>
+  <text x="740" y="704" class="body">Cond FiLM(scale, shift)</text>
+  <text x="740" y="726" class="body">RMSNorm(cond) -&gt; key, value</text>
+  <text x="740" y="754" class="tiny">KV source: cond stream only.</text>
+
+  <rect x="950" y="608" width="190" height="210" class="box time"/>
+  <text x="970" y="635" class="label">3. MLP</text>
+  <text x="970" y="660" class="body">RMSNorm(x)</text>
+  <text x="970" y="682" class="body">Time AdaLN(scale, shift)</text>
+  <text x="970" y="704" class="body">Cond FiLM(scale, shift)</text>
+  <text x="970" y="726" class="body">Linear -&gt; GELU -&gt; Linear</text>
+  <text x="970" y="754" class="tiny">Residual add closes the block.</text>
+
+  <path d="M 680 713 C 695 713, 705 713, 720 713" class="arrow"/>
+  <path d="M 910 713 C 925 713, 935 713, 950 713" class="arrow"/>
+
+  <rect x="1195" y="548" width="315" height="315" class="box"/>
+  <text x="1218" y="578" class="label">Modulation and Masking Notes</text>
+  <text x="1218" y="606" class="body">time_mod produces 6H values per block:</text>
+  <text x="1238" y="628" class="body">3 x (scale, shift) for AdaLN</text>
+  <text x="1218" y="660" class="body">cond_mod produces 6H values per token:</text>
+  <text x="1238" y="682" class="body">3 x (scale, shift) for FiLM</text>
+  <text x="1218" y="714" class="body">Memory prefix gets zero-padded FiLM</text>
+
+  <path d="M 425 705 C 438 705, 446 705, 460 705" class="arrow"/>
+  <path d="M 1170 705 C 1178 705, 1186 705, 1195 705" class="arrow"/>
+
+  <rect x="132" y="865" width="1245" height="32" class="note"/>
+  <text x="157" y="886" class="tiny">Residual structure is standard transformer style, but timestep conditioning and conditioning FiLM are applied before every self-attention, cross-attention, and MLP sublayer.</text>
+
+  <path d="M 260 450 C 260 470, 260 505, 260 565" class="dash"/>
+  <path d="M 1390 450 C 1390 470, 1390 505, 1390 548" class="dash"/>
+
+  <rect x="1085" y="130" width="455" height="48" class="note"/>
+  <text x="1108" y="160" class="tiny">Output head: strip memory, RMSNorm, project -&gt; velocity [B, 12, 64, T]</text>
+
+</svg>
