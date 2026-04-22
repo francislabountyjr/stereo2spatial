@@ -1,9 +1,20 @@
 # stereo2spatial
 
+<p align="center">
+  <img src="./assets/Wide310x150Logo.scale-200.png" alt="Stereo2Spatial logo" width="420" />
+</p>
+
+<p align="center">
+  <a href="https://get.microsoft.com/installer/download/9PJ6R7RQDVP1?referrer=appbadge&cid=model-github-readme" target="_self">
+    <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200" alt="Download from Microsoft" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://stereo2spatial.francislabounty.com/">App Homepage</a> | <a href="https://francislabounty.com/blog/stereo2spatial">Case Study</a>
+</p>
+
 [![CI](https://github.com/francislabountyjr/stereo2spatial/actions/workflows/ci.yml/badge.svg)](https://github.com/francislabountyjr/stereo2spatial/actions/workflows/ci.yml)
-<a href="https://get.microsoft.com/installer/download/9PJ6R7RQDVP1?referrer=appbadge&cid=model-github-readme" target="_self">
-	<img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200"/>
-</a>
 
 `stereo2spatial` is a training and inference stack for turning mono or stereo
 audio into spatial multichannel audio in an EAR-VAE latent space.
