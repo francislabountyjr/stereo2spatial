@@ -97,7 +97,7 @@
   <text x="135" y="708" class="body">time-context vector for AdaLN</text>
 
   <rect x="460" y="548" width="710" height="315" class="box"/>
-  <text x="485" y="578" class="label">One TransformerBlock</text>
+  <text x="485" y="578" class="label">One Transformer Block</text>
 
   <rect x="490" y="608" width="190" height="210" class="box model"/>
   <text x="510" y="635" class="label">1. Self-Attention</text>
@@ -135,7 +135,6 @@
   <text x="1218" y="714" class="body">Memory prefix gets zero-padded FiLM</text>
 
   <path d="M 425 705 C 438 705, 446 705, 460 705" class="arrow"/>
-  <path d="M 1170 705 C 1178 705, 1186 705, 1195 705" class="arrow"/>
 
   <rect x="132" y="865" width="1245" height="32" class="note"/>
   <text x="157" y="886" class="tiny">Residual structure is standard transformer style, but timestep conditioning and conditioning FiLM are applied before every self-attention, cross-attention, and MLP sublayer.</text>
