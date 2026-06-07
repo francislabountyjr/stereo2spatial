@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -12,7 +13,6 @@ from stereo2spatial.inference.export_bundle import (
     DEFAULT_BUNDLE_OVERLAP_SECONDS,
     build_train_config_from_bundle_payload,
     load_inference_bundle_payload,
-    resolve_bundle_vae_paths,
     resolve_inference_config_path,
 )
 from stereo2spatial.inference.runner import RequestedSolverName, WeightsSource
@@ -24,11 +24,22 @@ SOLVER_CHOICES = (
     "heun",
     "euler",
     "unipc",
+    "res6s",
+    "res_6s",
     "midpoint",
     "rk4",
     "explicit_adams",
     "implicit_adams",
 )
+
+
+def _safe_print(message: str) -> None:
+    """Print paths safely on Windows consoles that are not UTF-8."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        print(message.encode(encoding, errors="replace").decode(encoding))
 
 
 def resolve_cli_config_path(
@@ -64,39 +75,6 @@ def _load_runtime_config_and_bundle_payload(
     )
 
 
-def _resolve_cli_vae_paths(
-    *,
-    checkpoint: str,
-    resolved_config_path: str | Path,
-    vae_checkpoint_path: str | None,
-    vae_config_path: str | None,
-) -> tuple[Path, Path | None]:
-    if vae_checkpoint_path is not None and str(vae_checkpoint_path).strip():
-        explicit_checkpoint_path = Path(vae_checkpoint_path).resolve()
-        explicit_config_path = (
-            Path(vae_config_path).resolve()
-            if vae_config_path is not None and str(vae_config_path).strip()
-            else None
-        )
-        return explicit_checkpoint_path, explicit_config_path
-
-    resolved_checkpoint_path: Path | None = None
-    resolved_vae_config_path: Path | None = None
-    for candidate in (checkpoint, resolved_config_path):
-        maybe_checkpoint, maybe_config = resolve_bundle_vae_paths(candidate)
-        if maybe_checkpoint is not None:
-            resolved_checkpoint_path = maybe_checkpoint
-            resolved_vae_config_path = maybe_config
-            break
-
-    if resolved_checkpoint_path is None:
-        raise ValueError(
-            "EAR-VAE checkpoint path is required unless the checkpoint/config points "
-            "to an exported inference bundle that includes bundled EAR-VAE assets."
-        )
-    return resolved_checkpoint_path, resolved_vae_config_path
-
-
 def _resolve_runtime_arg(
     *,
     explicit_value: Any,
@@ -114,6 +92,18 @@ def _resolve_runtime_arg(
         if isinstance(section, dict) and key in section:
             return section[key]
     return fallback
+
+
+def _parse_mix_style_json(raw: str | None) -> list[float] | dict[str, float] | None:
+    """Parse optional normalized mix-style conditioning from CLI JSON."""
+    if raw is None or not str(raw).strip():
+        return None
+    payload = json.loads(raw)
+    if isinstance(payload, list):
+        return [float(value) for value in payload]
+    if isinstance(payload, dict):
+        return {str(key): float(value) for key, value in payload.items()}
+    raise TypeError("--mix-style-json must be a JSON list or object")
 
 
 def _add_model_and_io_args(parser: argparse.ArgumentParser) -> None:
@@ -149,54 +139,8 @@ def _add_model_and_io_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_vae_args(parser: argparse.ArgumentParser) -> None:
-    """Register EAR-VAE checkpoint and chunking CLI arguments."""
-    parser.add_argument(
-        "--vae-checkpoint-path",
-        default=None,
-        help=(
-            "Path to EAR-VAE checkpoint. If omitted, infer.py will use the bundled "
-            "EAR-VAE checkpoint from an exported inference bundle when available."
-        ),
-    )
-    parser.add_argument(
-        "--vae-config-path",
-        default=None,
-        help="Optional EAR-VAE config path.",
-    )
-    parser.add_argument(
-        "--encode-chunk-size-samples",
-        type=int,
-        default=None,
-        help="Optional VAE encode chunk size in samples.",
-    )
-    parser.add_argument(
-        "--encode-overlap-samples",
-        type=int,
-        default=None,
-        help="Optional VAE encode overlap in samples.",
-    )
-    parser.add_argument(
-        "--decode-chunk-size-frames",
-        type=int,
-        default=2048,
-        help="VAE decode chunk size in latent frames.",
-    )
-    parser.add_argument(
-        "--decode-overlap-frames",
-        type=int,
-        default=256,
-        help="VAE decode overlap in latent frames.",
-    )
-    parser.add_argument(
-        "--disable-chunked-decode",
-        action="store_true",
-        help="Disable chunked VAE decode path.",
-    )
-
-
 def _add_sampler_args(parser: argparse.ArgumentParser) -> None:
-    """Register latent sampler and solver-related CLI arguments."""
+    """Register waveform-patch sampler and solver-related CLI arguments."""
     parser.add_argument(
         "--sample-rate",
         type=int,
@@ -220,21 +164,22 @@ def _add_sampler_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help=(
-            "Chunk overlap in seconds for latent crossfade stitching. Defaults to 2.0."
+            "Chunk overlap in seconds for waveform-patch stitching. Defaults to 2.0."
         ),
     )
     parser.add_argument(
         "--solver",
         default=None,
         choices=SOLVER_CHOICES,
-        help=("Sampler for latent trajectory integration. " "'auto' selects heun."),
+        help=("Sampler for waveform trajectory integration. " "'auto' selects heun."),
     )
     parser.add_argument(
         "--solver-steps",
         type=int,
         default=None,
         help=(
-            "Step count for fixed-step solvers (heun/euler/unipc/midpoint/rk4/adams). "
+            "Step count for fixed-step solvers "
+            "(heun/euler/unipc/res6s/midpoint/rk4/adams). "
             "Ignored by adaptive solvers like dopri5. "
             "Defaults to 64."
         ),
@@ -242,6 +187,14 @@ def _add_sampler_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--solver-rtol", type=float, default=None)
     parser.add_argument("--solver-atol", type=float, default=None)
     parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument(
+        "--mix-style-json",
+        default=None,
+        help=(
+            "Optional normalized mix-style conditioning as a JSON list in model "
+            "order or a JSON object keyed by mix-style name. Defaults to omitted."
+        ),
+    )
 
 
 def _add_runtime_and_reporting_args(parser: argparse.ArgumentParser) -> None:
@@ -287,7 +240,6 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     _add_model_and_io_args(parser)
-    _add_vae_args(parser)
     _add_sampler_args(parser)
     _add_runtime_and_reporting_args(parser)
     return parser
@@ -302,12 +254,6 @@ def main() -> None:
     )
     config, bundle_payload = _load_runtime_config_and_bundle_payload(
         resolved_config_path
-    )
-    resolved_vae_checkpoint_path, resolved_vae_config_path = _resolve_cli_vae_paths(
-        checkpoint=args.checkpoint,
-        resolved_config_path=resolved_config_path,
-        vae_checkpoint_path=args.vae_checkpoint_path,
-        vae_config_path=args.vae_config_path,
     )
     sample_rate = int(
         _resolve_runtime_arg(
@@ -334,13 +280,12 @@ def main() -> None:
     normalize_peak = (
         bool(args.normalize_peak) if args.normalize_peak is not None else False
     )
+    mix_style = _parse_mix_style_json(args.mix_style_json)
     report = run_inference(
         config=config,
         checkpoint=args.checkpoint,
         input_audio_path=args.input_audio,
         output_audio_path=args.output_audio,
-        vae_checkpoint_path=resolved_vae_checkpoint_path,
-        vae_config_path=resolved_vae_config_path,
         sample_rate=sample_rate,
         chunk_seconds=chunk_seconds,
         overlap_seconds=overlap_seconds,
@@ -350,18 +295,20 @@ def main() -> None:
         solver_atol=solver_atol,
         seed=args.seed,
         device=args.device,
-        encode_chunk_size_samples=args.encode_chunk_size_samples,
-        encode_overlap_samples=args.encode_overlap_samples,
-        decode_chunk_size_frames=args.decode_chunk_size_frames,
-        decode_overlap_frames=args.decode_overlap_frames,
-        disable_chunked_decode=args.disable_chunked_decode,
         show_progress=args.show_progress,
         normalize_peak=normalize_peak,
+        mix_style=mix_style,
         weights_source=cast(WeightsSource, args.weights_source),
     )
     report_values = dict(report)
 
-    print("Inference complete:")
+    if args.report_json:
+        report_path = Path(args.report_json)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2, ensure_ascii=True)
+
+    _safe_print("Inference complete:")
     for key in [
         "config_path",
         "input_audio_path",
@@ -371,23 +318,24 @@ def main() -> None:
         "device",
         "input_channels",
         "sample_rate",
-        "conditioning_latent_shape",
-        "pred_latent_shape",
+        "conditioning_signal_shape",
+        "pred_signal_shape",
         "decoded_shape",
-        "latent_fps",
+        "patch_fps",
         "chunk_frames",
         "overlap_frames",
         "solver",
         "seed",
+        "mix_style",
     ]:
         if key == "config_path":
-            print(f"  - config_path={resolved_config_path}")
+            _safe_print(f"  - config_path={resolved_config_path}")
         else:
-            print(f"  - {key}={report_values[key]}")
+            _safe_print(f"  - {key}={report_values[key]}")
 
     if args.report_json:
-        report_path = Path(args.report_json)
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump(report, handle, indent=2, ensure_ascii=True)
-        print(f"  - report_json={report_path}")
+        _safe_print(f"  - report_json={report_path}")
+
+
+if __name__ == "__main__":
+    main()

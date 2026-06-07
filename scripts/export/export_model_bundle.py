@@ -9,7 +9,6 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from stereo2spatial.inference.export_bundle import (  # noqa: E402
-    DEFAULT_CHANNEL_ORDER_7_1_4,
     export_model_bundle,
 )
 
@@ -55,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--channel-order",
         nargs="+",
-        default=DEFAULT_CHANNEL_ORDER_7_1_4,
+        default=None,
         help="Ordered channel labels for the exported multichannel waveform layout.",
     )
     parser.add_argument(
@@ -63,32 +62,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=48000,
         help="Nominal audio sample rate recorded in the bundle metadata.",
-    )
-    parser.add_argument(
-        "--vae-checkpoint-path",
-        type=Path,
-        default=None,
-        help="Optional EAR-VAE checkpoint to copy into the bundle.",
-    )
-    parser.add_argument(
-        "--vae-config-path",
-        type=Path,
-        default=None,
-        help="Optional EAR-VAE config JSON to copy into the bundle.",
-    )
-    parser.add_argument(
-        "--ear-vae-root",
-        type=Path,
-        default=None,
-        help=(
-            "Optional EAR_VAE repo root used to resolve bundled EAR-VAE assets when "
-            "--vae-checkpoint-path/--vae-config-path are not provided."
-        ),
-    )
-    parser.add_argument(
-        "--exclude-vae",
-        action="store_true",
-        help="Do not bundle EAR-VAE assets.",
     )
     return parser
 
@@ -101,12 +74,10 @@ def main() -> None:
         output_dir=args.output_dir,
         weights_source=args.weights_source,
         channel_layout_name=args.channel_layout_name,
-        channel_order=list(args.channel_order),
+        channel_order=(
+            list(args.channel_order) if args.channel_order is not None else None
+        ),
         sample_rate=args.sample_rate,
-        include_vae=not args.exclude_vae,
-        ear_vae_root=args.ear_vae_root,
-        vae_checkpoint_path=args.vae_checkpoint_path,
-        vae_config_path=args.vae_config_path,
     )
 
     print("Export complete:")
@@ -114,10 +85,6 @@ def main() -> None:
     print(f"  - checkpoint_path={result.checkpoint_path}")
     print(f"  - weights_source={result.weights_source}")
     print(f"  - config_path={result.config_path}")
-    if result.vae_checkpoint_path is not None:
-        print(f"  - vae_checkpoint_path={result.vae_checkpoint_path}")
-    if result.vae_config_path is not None:
-        print(f"  - vae_config_path={result.vae_config_path}")
 
 
 if __name__ == "__main__":

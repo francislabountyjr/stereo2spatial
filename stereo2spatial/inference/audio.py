@@ -7,6 +7,11 @@ from pathlib import Path
 
 import torch
 
+from stereo2spatial.common.channel_layouts import (
+    CHANNEL_COUNT_FALLBACKS,
+    channel_mask_for_order,
+)
+
 try:
     import soundfile as sf
 except ModuleNotFoundError as error:
@@ -20,9 +25,10 @@ except ModuleNotFoundError:
     torchaudio = None
 
 _WAVE_FORMAT_EXTENSIBLE = 0xFFFE
-_CHANNEL_MASK_7_1_4 = 0x2D63F
 _CHANNEL_MASK_BY_COUNT = {
-    12: _CHANNEL_MASK_7_1_4,
+    channels: channel_mask_for_order(order)
+    for channels, order in CHANNEL_COUNT_FALLBACKS.items()
+    if channels > 2
 }
 
 
@@ -95,8 +101,9 @@ def write_audio_channels_first(
     audio_path: Path,
     audio: torch.Tensor,
     sample_rate: int,
+    channel_order: list[str] | None = None,
 ) -> None:
-    """Write [channels, samples] audio, preserving 7.1.4 speaker metadata."""
+    """Write [channels, samples] audio, preserving known speaker metadata."""
     if audio.dim() == 1:
         audio = audio.unsqueeze(0)
     if audio.dim() != 2:
@@ -104,8 +111,29 @@ def write_audio_channels_first(
             f"Expected audio shaped [channels, samples], got {tuple(audio.shape)}"
         )
 
-    channel_mask = _CHANNEL_MASK_BY_COUNT.get(int(audio.shape[0]))
-    write_kwargs: dict[str, str] = {"subtype": "FLOAT"}
+    if channel_order is not None and len(channel_order) != int(audio.shape[0]):
+        raise ValueError(
+            "channel_order length must match audio channels "
+            f"({len(channel_order)} != {int(audio.shape[0])})"
+        )
+    channel_count = int(audio.shape[0])
+    channel_mask = None
+    if channel_count > 2:
+        channel_mask = (
+            channel_mask_for_order(channel_order)
+            if channel_order is not None
+            else _CHANNEL_MASK_BY_COUNT.get(channel_count)
+        )
+    suffix = audio_path.suffix.lower()
+    if suffix == ".flac":
+        if channel_mask is not None:
+            raise ValueError(
+                "FLAC output is only supported for mono/stereo inference renders. "
+                "Use .wav for multichannel output that needs speaker masks."
+            )
+        write_kwargs: dict[str, str] = {"format": "FLAC", "subtype": "PCM_24"}
+    else:
+        write_kwargs = {"subtype": "FLOAT"}
     if channel_mask is not None:
         write_kwargs["format"] = "WAVEX"
 

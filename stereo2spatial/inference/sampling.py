@@ -1,7 +1,8 @@
-"""Latent sampling utilities used by the inference runner."""
+"""Waveform-patch sampling utilities used by the inference runner."""
 
 from __future__ import annotations
 
+import math
 from typing import cast
 
 import torch
@@ -16,6 +17,8 @@ from stereo2spatial.common.windowing import (
 from stereo2spatial.modeling import SpatialDiT
 
 SolverName = str
+_CLEAN_PREDICTION_EPS = 1e-4
+_INTEGRATION_T_END = 1.0 - _CLEAN_PREDICTION_EPS
 
 
 def _resolve_time_grid(
@@ -36,8 +39,10 @@ def _resolve_time_grid(
         "implicit_adams",
     }
     if method in fixed_step_methods:
-        return torch.linspace(0.0, 1.0, num_steps + 1, device=device, dtype=dtype)
-    return torch.tensor([0.0, 1.0], device=device, dtype=dtype)
+        return torch.linspace(
+            0.0, _INTEGRATION_T_END, num_steps + 1, device=device, dtype=dtype
+        )
+    return torch.tensor([0.0, _INTEGRATION_T_END], device=device, dtype=dtype)
 
 
 def _segment_starts(
@@ -71,8 +76,108 @@ def _chunk_weight(
     )
 
 
+def _clean_prediction_to_velocity(
+    clean_prediction: torch.Tensor,
+    z_state: torch.Tensor,
+    t_value: float,
+) -> torch.Tensor:
+    """Convert a clean endpoint prediction into the rectified-flow velocity."""
+    denom = max(1.0 - float(t_value), _CLEAN_PREDICTION_EPS)
+    return (clean_prediction - z_state) / denom
+
+
+def _phi_series(j: int, z: float, terms: int = 24) -> float:
+    """Evaluate phi_j(z) by its Taylor series for small |z|."""
+    total = 0.0
+    z_power = 1.0
+    for term_idx in range(terms):
+        total += z_power / math.factorial(term_idx + j)
+        z_power *= z
+    return total
+
+
+def _phi(j: int, z: float) -> float:
+    """Evaluate exponential-integrator phi_j(z)."""
+    if j <= 0:
+        raise ValueError("j must be positive")
+    if abs(z) < 1e-4:
+        return _phi_series(j, z)
+    remainder = sum((z**k) / math.factorial(k) for k in range(j))
+    return (math.exp(z) - remainder) / (z**j)
+
+
+def _res6s_tableau(step_size: float) -> tuple[list[float], list[list[float]], list[float]]:
+    """Return the RES4LYF res_6s exponential RK tableau for one time step.
+
+    Adapted from RES4LYF's ``beta/rk_coefficients_beta.py`` ``res_6s`` case.
+    The first coefficient column is generated so each stage row sums to
+    ``c_i * phi_1(-c_i h)`` and the final weights sum to ``phi_1(-h)``.
+    """
+    h = float(step_size)
+    c1, c2, c3, c4, c5, c6 = 0.0, 0.5, 0.5, 1.0 / 3.0, 1.0 / 3.0, 5.0 / 6.0
+    c = [c1, c2, c3, c4, c5, c6]
+
+    def phi_at(j: int, stage_index: int | None = None) -> float:
+        if stage_index is None:
+            stage_c = 1.0
+        else:
+            stage_c = c[stage_index]
+            if stage_c == 0.0:
+                return 0.0
+        return _phi(j, -h * stage_c)
+
+    a3_2 = (c3**2 / c2) * phi_at(2, 2)
+
+    a4_2 = (c4**2 / c2) * phi_at(2, 3)
+    a4_3 = (c4**2 * phi_at(2, 3) - a4_2 * c2) / c3
+
+    a5_2 = 0.0
+    a5_3 = (
+        -c4 * c5**2 * phi_at(2, 4) + 2.0 * c5**3 * phi_at(3, 4)
+    ) / (c3 * (c3 - c4))
+    a5_4 = (
+        -c3 * c5**2 * phi_at(2, 4) + 2.0 * c5**3 * phi_at(3, 4)
+    ) / (c4 * (c4 - c3))
+
+    a6_2 = 0.0
+    a6_3 = (
+        -c4 * c6**2 * phi_at(2, 5) + 2.0 * c6**3 * phi_at(3, 5)
+    ) / (c3 * (c3 - c4))
+    a6_4 = (
+        -c3 * c6**2 * phi_at(2, 5) + 2.0 * c6**3 * phi_at(3, 5)
+    ) / (c4 * (c4 - c3))
+    a6_5 = (c6**2 * phi_at(2, 5) - a6_3 * c3 - a6_4 * c4) / c5
+
+    b2 = b3 = b4 = 0.0
+    b5 = (-c6 * phi_at(2) + 2.0 * phi_at(3)) / (c5 * (c5 - c6))
+    b6 = (-c5 * phi_at(2) + 2.0 * phi_at(3)) / (c6 * (c6 - c5))
+
+    a = [
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, a3_2, 0.0, 0.0, 0.0, 0.0],
+        [0.0, a4_2, a4_3, 0.0, 0.0, 0.0],
+        [0.0, a5_2, a5_3, a5_4, 0.0, 0.0],
+        [0.0, a6_2, a6_3, a6_4, a6_5, 0.0],
+    ]
+    b = [0.0, b2, b3, b4, b5, b6]
+
+    for row_idx, stage_c in enumerate(c):
+        a[row_idx][0] = stage_c * phi_at(1, row_idx) - sum(a[row_idx])
+    b[0] = phi_at(1) - sum(b)
+    return c, a, b
+
+
+def _weighted_sum(weights: list[float], values: list[torch.Tensor]) -> torch.Tensor:
+    result = torch.zeros_like(values[0])
+    for weight, value in zip(weights, values):
+        if weight != 0.0:
+            result = result + float(weight) * value
+    return result
+
+
 @torch.no_grad()
-def _sample_chunk_latent(
+def _sample_chunk_signal(
     model: SpatialDiT,
     cond_chunk: torch.Tensor,
     valid_mask: torch.Tensor,
@@ -82,8 +187,9 @@ def _sample_chunk_latent(
     solver_rtol: float,
     solver_atol: float,
     mem: torch.Tensor | None,
+    mix_style: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Sample one latent chunk and optionally return updated memory tokens."""
+    """Sample one waveform-patch chunk and optionally return updated memory tokens."""
     batch_size = cond_chunk.shape[0]
     if batch_size != 1:
         raise ValueError(f"Expected batch_size=1 for inference chunk, got {batch_size}")
@@ -94,32 +200,32 @@ def _sample_chunk_latent(
     solver = solver.lower()
     mem_fixed = mem
 
-    def predict_velocity(t_value: float, z_state: torch.Tensor) -> torch.Tensor:
-        """Evaluate the model velocity field at scalar time `t_value`."""
+    def predict_clean(t_value: float, z_state: torch.Tensor) -> torch.Tensor:
+        """Evaluate the model clean waveform-patch prediction at scalar time `t_value`."""
         t_batch = torch.full(
             (batch_size,),
             float(t_value),
             device=z_state.device,
             dtype=z_state.dtype,
         )
-        if mem_fixed is None:
-            return cast(
-                torch.Tensor,
-                model(zt=z_state, t=t_batch, z_cond=cond_chunk, valid_mask=valid_mask),
-            )
-        return cast(
-            torch.Tensor,
-            model(
-                zt=z_state,
-                t=t_batch,
-                z_cond=cond_chunk,
-                valid_mask=valid_mask,
-                mem=mem_fixed,
-            ),
-        )
+        kwargs = {
+            "zt": z_state,
+            "t": t_batch,
+            "z_cond": cond_chunk,
+            "valid_mask": valid_mask,
+        }
+        if mix_style is not None:
+            kwargs["mix_style"] = mix_style
+        if mem_fixed is not None:
+            kwargs["mem"] = mem_fixed
+        return cast(torch.Tensor, model(**kwargs))
+
+    def predict_velocity(t_value: float, z_state: torch.Tensor) -> torch.Tensor:
+        clean_prediction = predict_clean(t_value, z_state)
+        return _clean_prediction_to_velocity(clean_prediction, z_state, t_value)
 
     if solver == "heun":
-        dt = 1.0 / float(solver_steps)
+        dt = _INTEGRATION_T_END / float(solver_steps)
         z_state = z0_chunk
         for step_idx in range(solver_steps):
             t0 = float(step_idx) * dt
@@ -130,9 +236,9 @@ def _sample_chunk_latent(
             v1 = predict_velocity(t1, z_euler)
             z_state = z_state + 0.5 * dt * (v0 + v1)
 
-        z1_chunk = z_state
+        z1_chunk = predict_clean(_INTEGRATION_T_END, z_state)
     elif solver == "unipc":
-        dt = 1.0 / float(solver_steps)
+        dt = _INTEGRATION_T_END / float(solver_steps)
         z_state = z0_chunk
         previous_velocity: torch.Tensor | None = None
         for step_idx in range(solver_steps):
@@ -156,7 +262,36 @@ def _sample_chunk_latent(
                 )
             previous_velocity = v0
 
-        z1_chunk = z_state
+        z1_chunk = predict_clean(_INTEGRATION_T_END, z_state)
+    elif solver == "euler":
+        dt = _INTEGRATION_T_END / float(solver_steps)
+        z_state = z0_chunk
+        for step_idx in range(solver_steps):
+            t0 = float(step_idx) * dt
+            v0 = predict_velocity(t0, z_state)
+            z_state = z_state + dt * v0
+
+        z1_chunk = predict_clean(_INTEGRATION_T_END, z_state)
+    elif solver in {"res6s", "res_6s"}:
+        dt = _INTEGRATION_T_END / float(solver_steps)
+        c, a, b = _res6s_tableau(dt)
+        z_state = z0_chunk
+        for step_idx in range(solver_steps):
+            t_base = float(step_idx) * dt
+            velocities: list[torch.Tensor] = []
+            for stage_idx, stage_c in enumerate(c):
+                if stage_idx == 0:
+                    z_stage = z_state
+                else:
+                    z_stage = z_state + dt * _weighted_sum(
+                        a[stage_idx][:stage_idx],
+                        velocities,
+                    )
+                t_stage = min(t_base + stage_c * dt, _INTEGRATION_T_END)
+                velocities.append(predict_velocity(t_stage, z_stage))
+            z_state = z_state + dt * _weighted_sum(b, velocities)
+
+        z1_chunk = predict_clean(_INTEGRATION_T_END, z_state)
     else:
 
         def velocity_field(
@@ -180,27 +315,36 @@ def _sample_chunk_latent(
             rtol=solver_rtol,
             atol=solver_atol,
         )
-        z1_chunk = cast(torch.Tensor, trajectory[-1])
+        z_state = cast(torch.Tensor, trajectory[-1])
+        z1_chunk = predict_clean(_INTEGRATION_T_END, z_state)
 
     if mem is None:
         return z1_chunk, None
 
-    ones = torch.ones((1,), device=device, dtype=dtype)
-    _, mem_out = model(
-        zt=z1_chunk,
-        t=ones,
-        z_cond=cond_chunk,
-        valid_mask=valid_mask,
-        mem=mem,
-        return_mem=True,
+    final_t = torch.full(
+        (1,),
+        _INTEGRATION_T_END,
+        device=device,
+        dtype=dtype,
     )
+    final_kwargs = {
+        "zt": z1_chunk,
+        "t": final_t,
+        "z_cond": cond_chunk,
+        "valid_mask": valid_mask,
+        "mem": mem,
+        "return_mem": True,
+    }
+    if mix_style is not None:
+        final_kwargs["mix_style"] = mix_style
+    _, mem_out = model(**final_kwargs)
     return z1_chunk, mem_out
 
 
 @torch.no_grad()
-def generate_spatial_latent(
+def generate_spatial_signal(
     model: SpatialDiT,
-    cond_latent: torch.Tensor,
+    cond_signal: torch.Tensor,
     chunk_frames: int,
     overlap_frames: int,
     solver: SolverName,
@@ -208,14 +352,20 @@ def generate_spatial_latent(
     solver_rtol: float,
     solver_atol: float,
     seed: int,
+    mix_style: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Sample target latents from conditioning latents with overlap-add chunking."""
-    if cond_latent.dim() != 3:
-        raise ValueError(f"cond_latent must be [C,D,T], got {tuple(cond_latent.shape)}")
-    if cond_latent.shape[0] != 1:
+    """Sample target waveform patches from conditioning patches with overlap-add."""
+    if cond_signal.dim() != 3:
+        raise ValueError(f"cond_signal must be [C,P,T], got {tuple(cond_signal.shape)}")
+    if cond_signal.shape[0] != model.cond_channels:
         raise ValueError(
-            "cond_latent first dimension must be 1 for current setup, "
-            f"got {cond_latent.shape[0]}"
+            "cond_signal first dimension must match model.cond_channels "
+            f"({cond_signal.shape[0]} != {model.cond_channels})"
+        )
+    if cond_signal.shape[1] != model.patch_size:
+        raise ValueError(
+            "cond_signal patch dimension must match model.patch_size "
+            f"({cond_signal.shape[1]} != {model.patch_size})"
         )
 
     if chunk_frames <= 0:
@@ -227,8 +377,18 @@ def generate_spatial_latent(
     if solver_steps <= 0:
         raise ValueError("solver_steps must be > 0")
 
-    cond_latent = cond_latent.contiguous().float()
-    total_frames = cond_latent.shape[-1]
+    cond_signal = cond_signal.contiguous().float()
+    if mix_style is not None:
+        if mix_style.dim() == 1:
+            mix_style = mix_style.view(1, -1)
+        expected_dim = int(getattr(model, "mix_style_dim", mix_style.shape[-1]))
+        if mix_style.shape != (1, expected_dim):
+            raise ValueError(
+                "mix_style must be [K] or [1,K] with "
+                f"K={expected_dim}, got {tuple(mix_style.shape)}"
+            )
+        mix_style = mix_style.to(device=cond_signal.device, dtype=torch.float32)
+    total_frames = cond_signal.shape[-1]
     stride_frames = chunk_frames - overlap_frames
     starts = _segment_starts(
         total_frames=total_frames,
@@ -237,19 +397,19 @@ def generate_spatial_latent(
     )
 
     target_channels = model.target_channels
-    latent_dim = model.latent_dim
+    patch_size = model.patch_size
 
     assembled = torch.zeros(
-        (target_channels, latent_dim, total_frames), dtype=torch.float32
+        (target_channels, patch_size, total_frames), dtype=torch.float32
     )
     weight_sum = torch.zeros((total_frames,), dtype=torch.float32)
 
-    device = cond_latent.device
+    device = cond_signal.device
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
 
     z0_full = torch.randn(
-        (1, target_channels, latent_dim, total_frames),
+        (1, target_channels, patch_size, total_frames),
         device=device,
         dtype=torch.float32,
         generator=generator,
@@ -262,16 +422,18 @@ def generate_spatial_latent(
         segment_length = min(chunk_frames, total_frames - start)
         end = min(end, total_frames)
 
-        cond_chunk = cond_latent[:, :, start:end]
+        cond_chunk = cond_signal[:, :, start:end]
         z0_chunk = z0_full[..., start:end]
 
         if segment_length < chunk_frames:
             pad_t = chunk_frames - segment_length
             pad_cond = torch.zeros(
-                (1, cond_latent.shape[1], pad_t), device=device, dtype=torch.float32
+                (model.cond_channels, patch_size, pad_t),
+                device=device,
+                dtype=torch.float32,
             )
             pad_z0 = torch.randn(
-                (1, target_channels, latent_dim, pad_t),
+                (1, target_channels, patch_size, pad_t),
                 device=device,
                 dtype=torch.float32,
                 generator=generator,
@@ -279,22 +441,25 @@ def generate_spatial_latent(
             cond_chunk = torch.cat([cond_chunk, pad_cond], dim=-1)
             z0_chunk = torch.cat([z0_chunk, pad_z0], dim=-1)
 
-        cond_chunk = cond_chunk.unsqueeze(1)
+        cond_chunk = cond_chunk.unsqueeze(0)
 
         valid_mask = torch.zeros((1, chunk_frames), device=device, dtype=torch.bool)
         valid_mask[:, :segment_length] = True
 
-        z1_chunk, mem = _sample_chunk_latent(
-            model=model,
-            cond_chunk=cond_chunk,
-            valid_mask=valid_mask,
-            z0_chunk=z0_chunk,
-            solver=solver,
-            solver_steps=solver_steps,
-            solver_rtol=solver_rtol,
-            solver_atol=solver_atol,
-            mem=mem,
-        )
+        sample_kwargs = {
+            "model": model,
+            "cond_chunk": cond_chunk,
+            "valid_mask": valid_mask,
+            "z0_chunk": z0_chunk,
+            "solver": solver,
+            "solver_steps": solver_steps,
+            "solver_rtol": solver_rtol,
+            "solver_atol": solver_atol,
+            "mem": mem,
+        }
+        if mix_style is not None:
+            sample_kwargs["mix_style"] = mix_style
+        z1_chunk, mem = _sample_chunk_signal(**sample_kwargs)
 
         pred_chunk = z1_chunk[0, :, :, :segment_length].detach().cpu()
 
@@ -314,8 +479,8 @@ def generate_spatial_latent(
 
 
 def resolve_chunk_frames(
-    cond_latent_frames: int,
-    latent_fps: float,
+    cond_signal_frames: int,
+    patch_fps: float,
     chunk_seconds: float,
     overlap_seconds: float,
 ) -> tuple[int, int]:
@@ -325,11 +490,11 @@ def resolve_chunk_frames(
     if overlap_seconds < 0:
         raise ValueError("overlap_seconds must be >= 0")
 
-    chunk_frames = max(1, int(round(chunk_seconds * latent_fps)))
-    overlap_frames = int(round(overlap_seconds * latent_fps))
+    chunk_frames = max(1, int(round(chunk_seconds * patch_fps)))
+    overlap_frames = int(round(overlap_seconds * patch_fps))
     overlap_frames = min(overlap_frames, max(0, chunk_frames - 1))
 
-    if cond_latent_frames < chunk_frames:
-        chunk_frames = cond_latent_frames
+    if cond_signal_frames < chunk_frames:
+        chunk_frames = cond_signal_frames
         overlap_frames = 0
     return chunk_frames, overlap_frames

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,11 @@ import torch
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 
+from stereo2spatial.common.channel_layouts import (
+    CHANNEL_ORDER_7_1_4,
+    channel_labels_for_layout,
+    channel_mask_for_order,
+)
 from stereo2spatial.training.config.types import (
     DataConfig,
     ModelConfig,
@@ -24,38 +28,14 @@ from stereo2spatial.training.config.types import (
 
 EXPORT_BUNDLE_CONFIG_FILENAME = "config.json"
 EXPORT_BUNDLE_WEIGHTS_FILENAME = "model.safetensors"
-EXPORT_BUNDLE_VAE_DIRNAME = "vae"
-EXPORT_BUNDLE_VAE_CONFIG_FILENAME = "ear_vae_v2.json"
-EXPORT_BUNDLE_VAE_WEIGHTS_FILENAME = "ear_vae_v2_48k.pyt"
-DEFAULT_EAR_VAE_ROOT = Path(r"E:\Python\EAR_VAE")
-DEFAULT_EAR_VAE_CONFIG_PATH = DEFAULT_EAR_VAE_ROOT / "config" / "ear_vae_v2.json"
-DEFAULT_EAR_VAE_CHECKPOINT_PATH = (
-    DEFAULT_EAR_VAE_ROOT / "pretrained_weight" / "ear_vae_v2_48k.pyt"
-)
 DEFAULT_BUNDLE_CHUNK_SECONDS = 10.0
 DEFAULT_BUNDLE_OVERLAP_SECONDS = 2.0
 
-DEFAULT_CHANNEL_ORDER_7_1_4 = [
-    "FL",
-    "FR",
-    "FC",
-    "LFE",
-    "BL",
-    "BR",
-    "SL",
-    "SR",
-    "TFL",
-    "TFR",
-    "TBL",
-    "TBR",
-]
+DEFAULT_CHANNEL_ORDER_7_1_4 = CHANNEL_ORDER_7_1_4
 
 _KNOWN_STATE_DICT_PREFIXES = ("_orig_mod.", "module.")
 _EMA_FILENAME_PATTERN = re.compile(r"^custom_checkpoint_\d+\.pkl$")
 _STEP_DIR_PATTERN = re.compile(r"^step_(\d+)$")
-_CHANNEL_MASK_BY_ORDER = {
-    tuple(DEFAULT_CHANNEL_ORDER_7_1_4): 0x2D63F,
-}
 
 
 @dataclass(frozen=True)
@@ -66,8 +46,6 @@ class ExportBundleResult:
     checkpoint_path: Path
     weights_source: str
     config_path: Path
-    vae_checkpoint_path: Path | None = None
-    vae_config_path: Path | None = None
 
 
 def _normalize_state_dict_keys(
@@ -227,7 +205,7 @@ def resolve_inference_config_path(checkpoint: str | Path) -> Path | None:
 
 
 def _resolve_channel_mask(channel_order: list[str]) -> int | None:
-    return _CHANNEL_MASK_BY_ORDER.get(tuple(channel_order))
+    return channel_mask_for_order(channel_order)
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:
@@ -251,27 +229,6 @@ def load_inference_bundle_payload(path: str | Path) -> dict[str, Any]:
     return payload
 
 
-def resolve_bundle_vae_paths(
-    checkpoint: str | Path,
-) -> tuple[Path | None, Path | None]:
-    checkpoint_path = Path(checkpoint)
-    if checkpoint_path.is_file():
-        bundle_root = checkpoint_path.parent
-    else:
-        bundle_root = checkpoint_path
-    checkpoint_candidate = (
-        bundle_root / EXPORT_BUNDLE_VAE_DIRNAME / EXPORT_BUNDLE_VAE_WEIGHTS_FILENAME
-    )
-    config_candidate = (
-        bundle_root / EXPORT_BUNDLE_VAE_DIRNAME / EXPORT_BUNDLE_VAE_CONFIG_FILENAME
-    )
-    resolved_checkpoint = (
-        checkpoint_candidate.resolve() if checkpoint_candidate.exists() else None
-    )
-    resolved_config = config_candidate.resolve() if config_candidate.exists() else None
-    return resolved_checkpoint, resolved_config
-
-
 def build_train_config_from_bundle_payload(
     payload: dict[str, Any],
     *,
@@ -283,19 +240,24 @@ def build_train_config_from_bundle_payload(
 
     model_raw = payload.get("model")
     audio_raw = payload.get("audio")
+    data_raw = payload.get("data")
     if model_raw is None:
         model_raw = payload
     if audio_raw is None:
         audio_raw = payload
+    if data_raw is None:
+        data_raw = payload
     if not isinstance(model_raw, dict):
         raise TypeError("bundle config is missing model fields")
     if not isinstance(audio_raw, dict):
         raise TypeError("bundle config is missing audio fields")
+    if not isinstance(data_raw, dict):
+        raise TypeError("bundle config has invalid data fields")
 
     model = ModelConfig(
         target_channels=int(model_raw["target_channels"]),
         cond_channels=int(model_raw["cond_channels"]),
-        latent_dim=int(model_raw["latent_dim"]),
+        patch_size=int(model_raw["patch_size"]),
         hidden_dim=int(model_raw["hidden_dim"]),
         num_layers=int(model_raw["num_layers"]),
         num_heads=int(model_raw["num_heads"]),
@@ -305,6 +267,21 @@ def build_train_config_from_bundle_payload(
         timestep_scale=float(model_raw["timestep_scale"]),
         max_period=float(model_raw["max_period"]),
         num_memory_tokens=int(model_raw.get("num_memory_tokens", 0)),
+        mix_style_dim=int(model_raw.get("mix_style_dim", 0)),
+        waveform_level_depth=int(model_raw.get("waveform_level_depth", 0)),
+        waveform_micro_patch_size=int(
+            model_raw.get("waveform_micro_patch_size", 16)
+        ),
+        waveform_hidden_dim=int(model_raw.get("waveform_hidden_dim", 16)),
+        waveform_num_heads=(
+            int(model_raw["waveform_num_heads"])
+            if model_raw.get("waveform_num_heads") is not None
+            else None
+        ),
+        waveform_mlp_ratio=float(model_raw.get("waveform_mlp_ratio", 2.0)),
+        activation_checkpointing=bool(
+            model_raw.get("activation_checkpointing", False)
+        ),
     )
 
     data = DataConfig(
@@ -314,7 +291,7 @@ def build_train_config_from_bundle_payload(
         segment_seconds=DEFAULT_BUNDLE_CHUNK_SECONDS,
         sequence_seconds=DEFAULT_BUNDLE_CHUNK_SECONDS,
         stride_seconds=DEFAULT_BUNDLE_CHUNK_SECONDS,
-        latent_fps=audio_raw["latent_fps"],
+        sample_rate=int(audio_raw["sample_rate"]),
         mono_probability=0.0,
         downmix_probability=0.0,
         cache_size=0,
@@ -325,6 +302,16 @@ def build_train_config_from_bundle_payload(
         pin_memory=False,
         persistent_workers=False,
         drop_last=False,
+        amplitude_lift_enabled=bool(data_raw.get("amplitude_lift_enabled", False)),
+        amplitude_lift_reference=str(data_raw.get("amplitude_lift_reference", "source")),
+        amplitude_lift_target_rms=float(data_raw.get("amplitude_lift_target_rms", 0.33)),
+        amplitude_lift_scale=float(data_raw.get("amplitude_lift_scale", 3.0)),
+        amplitude_lift_clip_value=(
+            None
+            if data_raw.get("amplitude_lift_clip_value", 4.0) is None
+            else float(data_raw.get("amplitude_lift_clip_value", 4.0))
+        ),
+        amplitude_lift_eps=float(data_raw.get("amplitude_lift_eps", 1.0e-8)),
     )
 
     training = TrainingConfig(
@@ -381,8 +368,11 @@ def build_train_config_from_bundle_payload(
         validation_generation_seed=0,
         validation_generation_input_path=None,
         validation_generation_output_path=None,
-        validation_generation_vae_checkpoint_path=None,
-        validation_generation_vae_config_path=None,
+        downmix_channel_order=(
+            list(audio_raw["channel_order"])
+            if isinstance(audio_raw.get("channel_order"), list)
+            else None
+        ),
     )
 
     optimizer = OptimizerConfig(
@@ -394,6 +384,8 @@ def build_train_config_from_bundle_payload(
         eps=1e-8,
         adamw_fused=False,
         adamw_foreach=False,
+        muon_ns_steps=5,
+        muon_nesterov=True,
     )
     scheduler = SchedulerConfig(
         type="cosine",
@@ -416,7 +408,7 @@ def _build_runtime_model_config(model_config: dict[str, Any]) -> dict[str, Any]:
     return {
         "target_channels": int(model_config["target_channels"]),
         "cond_channels": int(model_config["cond_channels"]),
-        "latent_dim": int(model_config["latent_dim"]),
+        "patch_size": int(model_config["patch_size"]),
         "hidden_dim": int(model_config["hidden_dim"]),
         "num_layers": int(model_config["num_layers"]),
         "num_heads": int(model_config["num_heads"]),
@@ -425,63 +417,56 @@ def _build_runtime_model_config(model_config: dict[str, Any]) -> dict[str, Any]:
         "timestep_scale": float(model_config["timestep_scale"]),
         "max_period": float(model_config["max_period"]),
         "num_memory_tokens": int(model_config.get("num_memory_tokens", 0)),
+        "mix_style_dim": int(model_config.get("mix_style_dim", 0)),
+        "waveform_level_depth": int(model_config.get("waveform_level_depth", 0)),
+        "waveform_micro_patch_size": int(
+            model_config.get("waveform_micro_patch_size", 16)
+        ),
+        "waveform_hidden_dim": int(model_config.get("waveform_hidden_dim", 16)),
+        "waveform_num_heads": (
+            int(model_config["waveform_num_heads"])
+            if model_config.get("waveform_num_heads") is not None
+            else None
+        ),
+        "waveform_mlp_ratio": float(model_config.get("waveform_mlp_ratio", 2.0)),
+        "activation_checkpointing": bool(
+            model_config.get("activation_checkpointing", False)
+        ),
     }
 
 
 def _build_runtime_config(
     *,
     model_config: dict[str, Any],
+    data_config: dict[str, Any],
     channel_layout_name: str,
     channel_order: list[str],
     sample_rate: int,
-    latent_fps: float | str,
 ) -> dict[str, Any]:
     return {
         "model_type": "spatial_dit",
         "architectures": ["SpatialDiT"],
         "sample_rate": int(sample_rate),
-        "latent_fps": latent_fps,
         "channel_layout": channel_layout_name,
         "channel_order": channel_order,
+        "channel_mask": _resolve_channel_mask(channel_order),
+        "amplitude_lift_enabled": bool(
+            data_config.get("amplitude_lift_enabled", False)
+        ),
+        "amplitude_lift_reference": str(
+            data_config.get("amplitude_lift_reference", "source")
+        ),
+        "amplitude_lift_target_rms": float(
+            data_config.get("amplitude_lift_target_rms", 0.33)
+        ),
+        "amplitude_lift_scale": float(data_config.get("amplitude_lift_scale", 3.0)),
+        "amplitude_lift_clip_value": data_config.get(
+            "amplitude_lift_clip_value",
+            4.0,
+        ),
+        "amplitude_lift_eps": float(data_config.get("amplitude_lift_eps", 1.0e-8)),
         **model_config,
     }
-
-
-def _resolve_export_vae_source_paths(
-    *,
-    include_vae: bool,
-    ear_vae_root: str | Path | None,
-    vae_checkpoint_path: str | Path | None,
-    vae_config_path: str | Path | None,
-) -> tuple[Path | None, Path | None]:
-    if not include_vae:
-        return None, None
-
-    if vae_checkpoint_path is not None:
-        resolved_checkpoint = Path(vae_checkpoint_path).resolve()
-    else:
-        root = (
-            Path(ear_vae_root).resolve()
-            if ear_vae_root is not None
-            else DEFAULT_EAR_VAE_ROOT.resolve()
-        )
-        resolved_checkpoint = (root / "pretrained_weight" / EXPORT_BUNDLE_VAE_WEIGHTS_FILENAME).resolve()
-
-    if vae_config_path is not None:
-        resolved_config = Path(vae_config_path).resolve()
-    else:
-        root = (
-            Path(ear_vae_root).resolve()
-            if ear_vae_root is not None
-            else DEFAULT_EAR_VAE_ROOT.resolve()
-        )
-        resolved_config = (root / "config" / EXPORT_BUNDLE_VAE_CONFIG_FILENAME).resolve()
-
-    if not resolved_checkpoint.exists():
-        raise FileNotFoundError(f"EAR-VAE checkpoint not found: {resolved_checkpoint}")
-    if not resolved_config.exists():
-        raise FileNotFoundError(f"EAR-VAE config not found: {resolved_config}")
-    return resolved_checkpoint, resolved_config
 
 
 def export_model_bundle(
@@ -493,10 +478,6 @@ def export_model_bundle(
     channel_layout_name: str = "7.1.4",
     channel_order: list[str] | None = None,
     sample_rate: int = 48000,
-    include_vae: bool = True,
-    ear_vae_root: str | Path | None = None,
-    vae_checkpoint_path: str | Path | None = None,
-    vae_config_path: str | Path | None = None,
 ) -> ExportBundleResult:
     """Export a training checkpoint into an inference-ready model bundle."""
     run_dir = Path(train_run_dir).resolve()
@@ -521,10 +502,12 @@ def export_model_bundle(
     if not isinstance(data_config, dict):
         raise TypeError("resolved_config.json is missing object section 'data'")
 
-    resolved_channel_order = list(
-        DEFAULT_CHANNEL_ORDER_7_1_4 if channel_order is None else channel_order
-    )
     target_channels = int(model_config["target_channels"])
+    resolved_channel_order = list(
+        channel_labels_for_layout(channel_layout_name, target_channels)
+        if channel_order is None
+        else channel_order
+    )
     if len(resolved_channel_order) != target_channels:
         raise ValueError(
             "channel_order length must match model.target_channels "
@@ -543,35 +526,13 @@ def export_model_bundle(
     weights_output_path = output_path / EXPORT_BUNDLE_WEIGHTS_FILENAME
     save_safetensors_file(normalized_state_dict, str(weights_output_path))
 
-    exported_vae_checkpoint_source, exported_vae_config_source = (
-        _resolve_export_vae_source_paths(
-            include_vae=include_vae,
-            ear_vae_root=ear_vae_root,
-            vae_checkpoint_path=vae_checkpoint_path,
-            vae_config_path=vae_config_path,
-        )
-    )
-    bundled_vae_checkpoint_path: Path | None = None
-    bundled_vae_config_path: Path | None = None
-    vae_dir = output_path / EXPORT_BUNDLE_VAE_DIRNAME
-    if vae_dir.exists():
-        shutil.rmtree(vae_dir)
-    if exported_vae_checkpoint_source is not None and exported_vae_config_source is not None:
-        vae_dir.mkdir(parents=True, exist_ok=True)
-        bundled_vae_checkpoint_path = (
-            vae_dir / EXPORT_BUNDLE_VAE_WEIGHTS_FILENAME
-        )
-        bundled_vae_config_path = vae_dir / EXPORT_BUNDLE_VAE_CONFIG_FILENAME
-        shutil.copy2(exported_vae_checkpoint_source, bundled_vae_checkpoint_path)
-        shutil.copy2(exported_vae_config_source, bundled_vae_config_path)
-
     runtime_config_path = output_path / EXPORT_BUNDLE_CONFIG_FILENAME
     runtime_config = _build_runtime_config(
         model_config=_build_runtime_model_config(model_config),
+        data_config=data_config,
         channel_layout_name=channel_layout_name,
         channel_order=resolved_channel_order,
         sample_rate=sample_rate,
-        latent_fps=data_config["latent_fps"],
     )
     runtime_config_path.write_text(
         json.dumps(runtime_config, indent=2, ensure_ascii=True) + "\n",
@@ -583,6 +544,4 @@ def export_model_bundle(
         checkpoint_path=checkpoint_path,
         weights_source=resolved_weights_source,
         config_path=runtime_config_path,
-        vae_checkpoint_path=bundled_vae_checkpoint_path,
-        vae_config_path=bundled_vae_config_path,
     )
