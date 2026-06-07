@@ -1,7 +1,6 @@
 import argparse
 import csv
 import json
-import math
 import os
 import re
 import sqlite3
@@ -17,8 +16,20 @@ import torch
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from stereo2spatial.common.mix_style import compute_mix_style_raw
+from stereo2spatial.common.mix_style import mix_style_active_names
+from stereo2spatial.common.mix_style import mix_style_inactive_names_for_layout
+from stereo2spatial.common.channel_layouts import (
+    AC3_DOWNMIX_COEFFICIENTS,
+    LAYOUT_CHANNELS,
+    channel_labels_for_layout as _shared_channel_labels_for_layout,
+    channel_mask_for_order,
+    is_headphone_virtualizer_layout,
+)
+
 from scripts.atmos.atmos_utils import (
     DEFAULT_AUDIO_FORMAT,
+    DEFAULT_CAVERNIZE_TIMEOUT_SEC,
     DEFAULT_CAVERNIZE_EXE,
     DEFAULT_EXTENSIONS,
     DEFAULT_FFMPEG_EXE,
@@ -39,13 +50,6 @@ from scripts.atmos.atmos_utils import (
     resolve_executable,
     run_cavernize,
 )
-from stereo2spatial.codecs.ear_vae import (
-    encode_channels_independent,
-    get_default_device,
-    load_vae,
-    vae_encode,
-)
-
 try:
     import soundfile as sf
 except ModuleNotFoundError as error:
@@ -64,7 +68,7 @@ DEFAULT_MANIFEST_FILENAME = "manifest.jsonl"
 DEFAULT_SAMPLE_RATE = 48000
 DEFAULT_DEAD_CHANNEL_THRESHOLD = 1e-6
 DEFAULT_MONO_REDUCTION = "mean"
-DEFAULT_LATENT_DTYPE = "float32"
+DEFAULT_SIGNAL_DTYPE = "float32"
 DEFAULT_KEEP_RENDERS = False
 DEFAULT_ALLOW_DEAD_CHANNELS = False
 DEFAULT_SHOW_PROGRESS = False
@@ -76,89 +80,21 @@ DEFAULT_STREAM_HASH_DB_FILENAME = "_processed_stream_hashes.sqlite3"
 DEFAULT_FAILED_STREAM_HASH_DB_FILENAME = "_failed_stream_hashes.sqlite3"
 DEFAULT_SAMPLE_ARTIFACT_MODE = "bundle"
 
-TARGET_LATENT_FILENAME = "target_latent.pt"
-SOURCE_STEREO_LATENT_FILENAME = "source_stereo_latent.pt"
-SOURCE_MONO_LATENT_FILENAME = "source_mono_latent.pt"
-SOURCE_DOWNMIX_LATENT_FILENAME = "source_downmix_latent.pt"
+TARGET_SIGNAL_FILENAME = "target_signal.pt"
+SOURCE_STEREO_SIGNAL_FILENAME = "source_stereo_signal.pt"
+SOURCE_MONO_SIGNAL_FILENAME = "source_mono_signal.pt"
+SOURCE_DOWNMIX_SIGNAL_FILENAME = "source_downmix_signal.pt"
 METADATA_FILENAME = "metadata.json"
 SAMPLE_BUNDLE_FILENAME = "sample_bundle.pt"
+TARGET_SIGNAL_FLAC_FILENAME = "target_signal.flac"
+SOURCE_STEREO_SIGNAL_FLAC_FILENAME = "source_stereo_signal.flac"
+SOURCE_MONO_SIGNAL_FLAC_FILENAME = "source_mono_signal.flac"
+SOURCE_DOWNMIX_SIGNAL_FLAC_FILENAME = "source_downmix_signal.flac"
 AC3_MATRIX_VERSION = "ac3_fixed_v1"
-
-SQRT_HALF = 1.0 / math.sqrt(2.0)
-
-AC3_COEFFICIENTS: dict[str, tuple[float, float]] = {
-    "FL": (1.0, 0.0),
-    "FR": (0.0, 1.0),
-    "FC": (SQRT_HALF, SQRT_HALF),
-    "LFE": (0.5, 0.5),
-    "LFE2": (0.5, 0.5),
-    "BL": (SQRT_HALF, 0.0),
-    "BR": (0.0, SQRT_HALF),
-    "SL": (SQRT_HALF, 0.0),
-    "SR": (0.0, SQRT_HALF),
-    "BC": (0.5, 0.5),
-    "FLC": (SQRT_HALF, 0.0),
-    "FRC": (0.0, SQRT_HALF),
-    "TFL": (0.5, 0.0),
-    "TFR": (0.0, 0.5),
-    "TBL": (0.5, 0.0),
-    "TBR": (0.0, 0.5),
-    "TFC": (0.3535533905932738, 0.3535533905932738),
-    "TC": (0.3535533905932738, 0.3535533905932738),
-    "TBC": (0.3535533905932738, 0.3535533905932738),
-}
-
-LAYOUT_CHANNELS: dict[str, list[str]] = {
-    "mono": ["FC"],
-    "stereo": ["FL", "FR"],
-    "2.1": ["FL", "FR", "LFE"],
-    "3.0": ["FL", "FR", "FC"],
-    "3.0(back)": ["FL", "FR", "BC"],
-    "3.1": ["FL", "FR", "FC", "LFE"],
-    "4.0": ["FL", "FR", "FC", "BC"],
-    "quad": ["FL", "FR", "BL", "BR"],
-    "quad(side)": ["FL", "FR", "SL", "SR"],
-    "5.0": ["FL", "FR", "FC", "BL", "BR"],
-    "5.0(side)": ["FL", "FR", "FC", "SL", "SR"],
-    "5.1": ["FL", "FR", "FC", "LFE", "BL", "BR"],
-    "5.1(side)": ["FL", "FR", "FC", "LFE", "SL", "SR"],
-    "6.1": ["FL", "FR", "FC", "LFE", "BC", "SL", "SR"],
-    "6.1(back)": ["FL", "FR", "FC", "LFE", "BL", "BR", "BC"],
-    "7.0": ["FL", "FR", "FC", "BL", "BR", "SL", "SR"],
-    "7.0(front)": ["FL", "FR", "FC", "FLC", "FRC", "SL", "SR"],
-    "7.1": ["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"],
-    "7.1(wide)": ["FL", "FR", "FC", "LFE", "FLC", "FRC", "SL", "SR"],
-    "7.1.2": ["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR", "TFL", "TFR"],
-    "7.1.4": [
-        "FL",
-        "FR",
-        "FC",
-        "LFE",
-        "BL",
-        "BR",
-        "SL",
-        "SR",
-        "TFL",
-        "TFR",
-        "TBL",
-        "TBR",
-    ],
-}
-
-CHANNEL_COUNT_FALLBACKS: dict[int, list[str]] = {
-    1: ["FC"],
-    2: ["FL", "FR"],
-    3: ["FL", "FR", "FC"],
-    4: ["FL", "FR", "BL", "BR"],
-    5: ["FL", "FR", "FC", "SL", "SR"],
-    6: ["FL", "FR", "FC", "LFE", "SL", "SR"],
-    8: ["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"],
-    10: ["FL", "FR", "FC", "LFE", "SL", "SR", "TFL", "TFR", "TBL", "TBR"],
-    12: ["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR", "TFL", "TFR", "TBL", "TBR"],
-}
+AC3_COEFFICIENTS = AC3_DOWNMIX_COEFFICIENTS
 
 
-def parse_torch_dtype(raw_dtype: str) -> torch.dtype:
+def parse_signal_dtype(raw_dtype: str) -> torch.dtype:
     normalized = raw_dtype.strip().lower()
     if normalized in {"float16", "fp16"}:
         return torch.float16
@@ -166,7 +102,7 @@ def parse_torch_dtype(raw_dtype: str) -> torch.dtype:
         return torch.bfloat16
     if normalized in {"float32", "fp32"}:
         return torch.float32
-    raise ValueError(f"Unsupported latent dtype: {raw_dtype!r}")
+    raise ValueError(f"Unsupported signal dtype: {raw_dtype!r}")
 
 
 def normalize_path_key(path: Path) -> str:
@@ -521,38 +457,17 @@ def read_audio_channels_first(
     return audio, target_sample_rate
 
 
-def _layout_key_candidates(layout: str) -> list[str]:
-    key = layout.strip().lower()
-    condensed = key.replace(" ", "")
-    return [
-        key,
-        condensed,
-        condensed.replace("_", "."),
-    ]
-
-
 def channel_labels_for_layout(layout: str, num_channels: int) -> list[str]:
-    for candidate in _layout_key_candidates(layout):
-        if candidate in LAYOUT_CHANNELS:
-            labels = LAYOUT_CHANNELS[candidate]
-            if len(labels) == num_channels:
-                return labels
-            print(
-                "  - LAYOUT WARN configured layout/channel mismatch: "
-                f"layout={layout!r} implies {len(labels)} channels, "
-                f"render has {num_channels}"
-            )
-            break
-
-    if "+" in layout:
-        split_labels = [part.strip().upper() for part in layout.split("+")]
-        if len(split_labels) == num_channels and all(split_labels):
-            return split_labels
-
-    fallback = CHANNEL_COUNT_FALLBACKS.get(num_channels)
-    if fallback is not None:
-        return fallback
-    return [f"C{i}" for i in range(num_channels)]
+    labels = _shared_channel_labels_for_layout(layout=layout, num_channels=num_channels)
+    layout_key = layout.strip().lower()
+    configured_labels = LAYOUT_CHANNELS.get(layout_key)
+    if configured_labels is not None and len(configured_labels) != num_channels:
+        print(
+            "  - LAYOUT WARN configured layout/channel mismatch: "
+            f"layout={layout!r} implies {len(configured_labels)} channels, "
+            f"render has {num_channels}"
+        )
+    return labels
 
 
 def downmix_multichannel_to_stereo_ac3(
@@ -594,6 +509,13 @@ def reduce_stereo_to_mono(stereo_audio: torch.Tensor, mode: str) -> torch.Tensor
     if mode == "right":
         return stereo_audio[1:2, :]
     raise ValueError("mono reduction must be one of: mean, left, right")
+
+
+def duplicate_mono_to_stereo_width(mono_audio: torch.Tensor) -> torch.Tensor:
+    """Store mono conditioning in the same channel width as stereo conditioning."""
+    if mono_audio.dim() != 2 or mono_audio.shape[0] != 1:
+        raise ValueError(f"Expected mono [1,S], got {tuple(mono_audio.shape)}")
+    return mono_audio.expand(2, -1).contiguous()
 
 
 def dead_channel_indices(audio: torch.Tensor, threshold: float) -> list[int]:
@@ -650,32 +572,87 @@ def render_dir_for_file(
     return render_root / "_by_hash" / stream_hash[:2] / stream_hash[2:4] / stream_hash
 
 
-def split_sample_artifacts_exist(sample_dir: Path) -> bool:
+def metadata_file_is_valid(metadata_path: Path) -> bool:
+    if not metadata_path.exists():
+        return False
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get("stream_hash"))
+
+
+def split_sample_artifacts_exist(
+    sample_dir: Path,
+    *,
+    save_source_mono: bool,
+    save_source_downmix: bool,
+) -> bool:
+    metadata_path = sample_dir / METADATA_FILENAME
     required = [
-        sample_dir / TARGET_LATENT_FILENAME,
-        sample_dir / SOURCE_STEREO_LATENT_FILENAME,
-        sample_dir / SOURCE_MONO_LATENT_FILENAME,
-        sample_dir / SOURCE_DOWNMIX_LATENT_FILENAME,
-        sample_dir / METADATA_FILENAME,
+        sample_dir / TARGET_SIGNAL_FILENAME,
+        sample_dir / SOURCE_STEREO_SIGNAL_FILENAME,
     ]
-    return all(path.exists() for path in required)
+    if save_source_mono:
+        required.append(sample_dir / SOURCE_MONO_SIGNAL_FILENAME)
+    if save_source_downmix:
+        required.append(sample_dir / SOURCE_DOWNMIX_SIGNAL_FILENAME)
+    return metadata_file_is_valid(metadata_path) and all(
+        path.exists() for path in required
+    )
 
 
 def bundled_sample_artifacts_exist(sample_dir: Path) -> bool:
+    metadata_path = sample_dir / METADATA_FILENAME
     required = [
         sample_dir / SAMPLE_BUNDLE_FILENAME,
-        sample_dir / METADATA_FILENAME,
     ]
-    return all(path.exists() for path in required)
+    return metadata_file_is_valid(metadata_path) and all(path.exists() for path in required)
 
 
-def all_latent_artifacts_exist(sample_dir: Path, sample_artifact_mode: str) -> bool:
-    split_exists = split_sample_artifacts_exist(sample_dir)
+def flac_sample_artifacts_exist(
+    sample_dir: Path,
+    *,
+    save_source_mono: bool,
+    save_source_downmix: bool,
+) -> bool:
+    metadata_path = sample_dir / METADATA_FILENAME
+    required = [
+        sample_dir / TARGET_SIGNAL_FLAC_FILENAME,
+        sample_dir / SOURCE_STEREO_SIGNAL_FLAC_FILENAME,
+    ]
+    if save_source_mono:
+        required.append(sample_dir / SOURCE_MONO_SIGNAL_FLAC_FILENAME)
+    if save_source_downmix:
+        required.append(sample_dir / SOURCE_DOWNMIX_SIGNAL_FLAC_FILENAME)
+    return metadata_file_is_valid(metadata_path) and all(
+        path.exists() for path in required
+    )
+
+
+def all_signal_artifacts_exist(
+    sample_dir: Path,
+    sample_artifact_mode: str,
+    *,
+    save_source_mono: bool,
+    save_source_downmix: bool,
+) -> bool:
+    split_exists = split_sample_artifacts_exist(
+        sample_dir,
+        save_source_mono=save_source_mono,
+        save_source_downmix=save_source_downmix,
+    )
     bundled_exists = bundled_sample_artifacts_exist(sample_dir)
+    flac_exists = flac_sample_artifacts_exist(
+        sample_dir,
+        save_source_mono=save_source_mono,
+        save_source_downmix=save_source_downmix,
+    )
 
-    if sample_artifact_mode not in {"split", "bundle"}:
+    if sample_artifact_mode not in {"split", "bundle", "flac"}:
         raise ValueError(f"Unsupported sample artifact mode: {sample_artifact_mode!r}")
-    return split_exists or bundled_exists
+    return split_exists or bundled_exists or flac_exists
 
 
 def append_manifest_record(manifest_file: Path, payload: dict) -> None:
@@ -692,51 +669,78 @@ def safe_unlink(path: Path) -> None:
         pass
 
 
-def align_latent_lengths(
-    target_latent: torch.Tensor,
-    source_stereo_latent: torch.Tensor,
-    source_mono_latent: torch.Tensor,
-    source_downmix_latent: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def align_signal_lengths(
+    target_signal: torch.Tensor,
+    source_stereo_signal: torch.Tensor,
+    source_mono_signal: torch.Tensor | None = None,
+    source_downmix_signal: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     lengths = [
-        target_latent.shape[-1],
-        source_stereo_latent.shape[-1],
-        source_mono_latent.shape[-1],
-        source_downmix_latent.shape[-1],
+        target_signal.shape[-1],
+        source_stereo_signal.shape[-1],
     ]
+    if source_mono_signal is not None:
+        lengths.append(source_mono_signal.shape[-1])
+    if source_downmix_signal is not None:
+        lengths.append(source_downmix_signal.shape[-1])
     min_length = min(lengths)
     if min_length <= 0:
-        raise RuntimeError(f"Invalid latent lengths (min={min_length}): {lengths}")
+        raise RuntimeError(f"Invalid signal lengths (min={min_length}): {lengths}")
     if len(set(lengths)) == 1:
         return (
-            target_latent,
-            source_stereo_latent,
-            source_mono_latent,
-            source_downmix_latent,
+            target_signal,
+            source_stereo_signal,
+            source_mono_signal,
+            source_downmix_signal,
         )
-    print(f"  - LATENT ALIGN: trimming lengths {lengths} -> {min_length}")
+    print(f"  - SIGNAL ALIGN: trimming sample lengths {lengths} -> {min_length}")
     return (
-        target_latent[..., :min_length],
-        source_stereo_latent[..., :min_length],
-        source_mono_latent[..., :min_length],
-        source_downmix_latent[..., :min_length],
+        target_signal[..., :min_length],
+        source_stereo_signal[..., :min_length],
+        source_mono_signal[..., :min_length] if source_mono_signal is not None else None,
+        source_downmix_signal[..., :min_length]
+        if source_downmix_signal is not None
+        else None,
     )
 
 
-def ensure_cdt_latent(latent: torch.Tensor, name: str) -> torch.Tensor:
-    if latent.dim() == 2:
-        return latent.unsqueeze(0).contiguous()
-    if latent.dim() == 3:
-        return latent.contiguous()
-    raise ValueError(
-        f"{name} must have shape [D, T] or [C, D, T], got {tuple(latent.shape)}"
+def ensure_cs_signal(signal: torch.Tensor, name: str) -> torch.Tensor:
+    if signal.dim() == 2:
+        return signal.contiguous()
+    raise ValueError(f"{name} must have shape [C, S], got {tuple(signal.shape)}")
+
+
+def assert_finite_signal(signal: torch.Tensor | None, name: str) -> None:
+    """Reject rendered signals containing NaN or Inf before saving samples."""
+    if signal is None:
+        return
+    finite = torch.isfinite(signal.float())
+    if bool(finite.all()):
+        return
+    bad_count = int((~finite).sum().item())
+    total = int(signal.numel())
+    raise RuntimeError(
+        f"{name} contains non-finite samples: bad={bad_count}/{total} "
+        f"shape={tuple(signal.shape)}"
+    )
+
+
+def write_signal_flac(path: Path, signal: torch.Tensor, sample_rate: int) -> None:
+    """Write `[C,S]` float audio as lossless FLAC PCM_24."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(
+        str(path),
+        signal.float().t().cpu().numpy(),
+        int(sample_rate),
+        format="FLAC",
+        subtype="PCM_24",
     )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Render Atmos sources and build a resumable latent dataset for stereo->spatial modeling."
+            "Render Atmos sources and build a resumable waveform dataset for stereo->spatial modeling."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -773,6 +777,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--audio-format", default=DEFAULT_AUDIO_FORMAT)
+    parser.add_argument(
+        "--cavernize-timeout-sec",
+        type=float,
+        default=DEFAULT_CAVERNIZE_TIMEOUT_SEC,
+        help=(
+            "Per-render Cavernize timeout in seconds. "
+            "Timed-out renders are killed, marked failed, and retried only with "
+            "--retry-failed."
+        ),
+    )
     parser.add_argument(
         "--force-24-bit", action="store_true", default=DEFAULT_FORCE_24_BIT
     )
@@ -837,12 +851,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--sample-rate",
         type=int,
         default=DEFAULT_SAMPLE_RATE,
-        help="Sample rate used for latent encoding.",
+        help="Sample rate used for waveform artifacts.",
     )
     parser.add_argument(
         "--mono-reduction",
         choices=["mean", "left", "right"],
         default=DEFAULT_MONO_REDUCTION,
+    )
+    parser.add_argument(
+        "--skip-source-mono",
+        action="store_true",
+        help=(
+            "Do not save source_mono_signal. Use training configs with "
+            "data.mono_probability=0.0 when this is enabled."
+        ),
     )
     parser.add_argument(
         "--dead-channel-threshold",
@@ -864,73 +886,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--sample-artifact-mode",
-        choices=["split", "bundle"],
+        choices=["split", "bundle", "flac"],
         default=DEFAULT_SAMPLE_ARTIFACT_MODE,
         help=(
             "How to persist per-sample artifacts: "
-            "'split' writes 4 latent files + metadata.json, "
-            "'bundle' writes 1 bundled latent file + metadata.json."
+            "'split' writes 4 signal files + metadata.json, "
+            "'bundle' writes 1 bundled signal file + metadata.json, "
+            "'flac' writes lossless PCM_24 FLAC signal files + metadata.json."
         ),
     )
     parser.add_argument(
         "--keep-renders",
         action="store_true",
         default=DEFAULT_KEEP_RENDERS,
-        help="Persist rendered WAV files instead of deleting them after latent export.",
+        help="Persist rendered WAV files after signal export.",
     )
     parser.add_argument(
-        "--vae-checkpoint-path",
-        required=True,
-        help="Path to EAR_VAE checkpoint.",
-    )
-    parser.add_argument(
-        "--vae-config-path",
-        default=None,
-        help="Optional path to VAE config JSON.",
-    )
-    parser.add_argument(
-        "--device",
-        default=None,
-        help="Torch device for encoding (e.g., cuda, cpu). Defaults to auto.",
-    )
-    parser.add_argument(
-        "--latent-dtype",
-        default=DEFAULT_LATENT_DTYPE,
+        "--signal-dtype",
+        default=DEFAULT_SIGNAL_DTYPE,
         choices=["float32", "fp32", "float16", "fp16", "bfloat16", "bf16"],
-        help="Saved latent dtype on disk.",
-    )
-    parser.add_argument(
-        "--use-sample",
-        action="store_true",
-        help="Use stochastic sampling in VAE encoding.",
-    )
-    parser.add_argument(
-        "--disable-chunked-encode",
-        action="store_true",
-        help="Disable chunked VAE encode path.",
-    )
-    parser.add_argument(
-        "--encode-chunk-size-samples",
-        type=int,
-        default=None,
-        help="Override VAE encode chunk size.",
-    )
-    parser.add_argument(
-        "--encode-overlap-samples",
-        type=int,
-        default=None,
-        help="Override VAE encode overlap size.",
-    )
-    parser.add_argument(
-        "--disable-offload-latent-to-cpu",
-        action="store_true",
-        help="Keep intermediate latents on accelerator during encoding.",
+        help="Saved signal dtype on disk.",
     )
     parser.add_argument(
         "--show-progress",
         action="store_true",
         default=DEFAULT_SHOW_PROGRESS,
-        help="Enable tqdm progress bars inside chunked encode.",
+        help="Reserved for progress reporting.",
     )
     parser.add_argument(
         "--max-files",
@@ -982,9 +963,7 @@ def main() -> None:
     extensions = normalize_extensions(args.extensions)
     output_layout_suffix = layout_to_suffix(args.target_output_layout)
     input_layout_suffix = layout_to_suffix(args.target_input_layout)
-    latent_dtype = parse_torch_dtype(args.latent_dtype)
-    encode_device = torch.device(args.device) if args.device else get_default_device()
-
+    signal_dtype = parse_signal_dtype(args.signal_dtype)
     if not extensions:
         raise ValueError("At least one valid extension must be provided.")
 
@@ -1028,15 +1007,6 @@ def main() -> None:
     if args.retry_failed:
         print("Retrying known failures is enabled (--retry-failed).")
 
-    print(f"Loading VAE on device={encode_device} ...")
-    vae = load_vae(
-        vae_checkpoint_path=args.vae_checkpoint_path,
-        config_path=args.vae_config_path,
-        device=encode_device,
-        torch_dtype=torch.float32,
-    )
-    print("VAE loaded.")
-
     scan_input_root: Optional[Path] = None if qc_mode else input_root
     if scan_input_root is not None and not scan_input_root.exists():
         raise FileNotFoundError(f"Input folder not found: {scan_input_root}")
@@ -1073,9 +1043,6 @@ def main() -> None:
     if qc_csv_path is not None:
         print(f"Selected {len(media_files)} media files from QC CSV")
 
-    use_chunked_encode = not args.disable_chunked_encode
-    offload_latent_to_cpu = not args.disable_offload_latent_to_cpu
-
     counters = {
         "success": 0,
         "skip_existing": 0,
@@ -1087,6 +1054,8 @@ def main() -> None:
         "skip_render_failure": 0,
         "skip_error": 0,
     }
+    save_source_mono = not bool(args.skip_source_mono)
+    save_source_downmix = not is_headphone_virtualizer_layout(args.target_output_layout)
 
     for index, in_file in enumerate(media_files, 1):
         print(f"\n[{index}/{len(media_files)}] {in_file}")
@@ -1109,17 +1078,23 @@ def main() -> None:
             sample_dir = sample_dir_from_stream_hash(dataset_root, stream_hash)
             metadata_path = sample_dir / METADATA_FILENAME
             bundle_path = sample_dir / SAMPLE_BUNDLE_FILENAME
-            latent_paths = {
-                "target": sample_dir / TARGET_LATENT_FILENAME,
-                "source_stereo": sample_dir / SOURCE_STEREO_LATENT_FILENAME,
-                "source_mono": sample_dir / SOURCE_MONO_LATENT_FILENAME,
-                "source_downmix": sample_dir / SOURCE_DOWNMIX_LATENT_FILENAME,
+            signal_paths = {
+                "target": sample_dir / TARGET_SIGNAL_FILENAME,
+                "source_stereo": sample_dir / SOURCE_STEREO_SIGNAL_FILENAME,
+                "source_mono": sample_dir / SOURCE_MONO_SIGNAL_FILENAME,
+                "source_downmix": sample_dir / SOURCE_DOWNMIX_SIGNAL_FILENAME,
+                "target_flac": sample_dir / TARGET_SIGNAL_FLAC_FILENAME,
+                "source_stereo_flac": sample_dir / SOURCE_STEREO_SIGNAL_FLAC_FILENAME,
+                "source_mono_flac": sample_dir / SOURCE_MONO_SIGNAL_FLAC_FILENAME,
+                "source_downmix_flac": sample_dir / SOURCE_DOWNMIX_SIGNAL_FLAC_FILENAME,
             }
 
             known_source = hash_store.get_source(stream_hash)
-            if all_latent_artifacts_exist(
+            if all_signal_artifacts_exist(
                 sample_dir=sample_dir,
                 sample_artifact_mode=args.sample_artifact_mode,
+                save_source_mono=save_source_mono,
+                save_source_downmix=save_source_downmix,
             ):
                 counters["skip_existing"] += 1
                 print(
@@ -1176,6 +1151,7 @@ def main() -> None:
                     audio_format=args.audio_format,
                     force_24_bit=args.force_24_bit,
                     log_file=target_log,
+                    timeout_sec=args.cavernize_timeout_sec,
                 )
                 if not ok_render:
                     counters["skip_render_failure"] += 1
@@ -1253,6 +1229,7 @@ def main() -> None:
                     audio_format=args.audio_format,
                     force_24_bit=args.force_24_bit,
                     log_file=stereo_log,
+                    timeout_sec=args.cavernize_timeout_sec,
                 )
                 if not ok_render:
                     counters["skip_render_failure"] += 1
@@ -1281,139 +1258,185 @@ def main() -> None:
             channel_labels = channel_labels_for_layout(
                 layout=args.target_output_layout, num_channels=target_audio.shape[0]
             )
-            source_downmix_audio = downmix_multichannel_to_stereo_ac3(
-                multichannel_audio=target_audio, channel_labels=channel_labels
+            target_is_binaural_stereo = is_headphone_virtualizer_layout(
+                args.target_output_layout
             )
-            peak = source_downmix_audio.abs().amax().item()
-            if peak > 1.0:
-                source_downmix_audio = source_downmix_audio / peak * 0.99
+            mix_style_layout_mode = (
+                "binaural_stereo" if target_is_binaural_stereo else "discrete_channels"
+            )
+            mix_style_inactive_names = list(
+                mix_style_inactive_names_for_layout(
+                    target_channels=int(target_audio.shape[0]),
+                    is_binaural_stereo=target_is_binaural_stereo,
+                    channel_labels=channel_labels,
+                )
+            )
+            mix_style_names = list(
+                mix_style_active_names(inactive_names=mix_style_inactive_names)
+            )
+            source_downmix_audio: torch.Tensor | None = None
+            if not target_is_binaural_stereo:
+                source_downmix_audio = downmix_multichannel_to_stereo_ac3(
+                    multichannel_audio=target_audio, channel_labels=channel_labels
+                )
+                peak = source_downmix_audio.abs().amax().item()
+                if peak > 1.0:
+                    source_downmix_audio = source_downmix_audio / peak * 0.99
 
-            common_samples = min(
-                target_audio.shape[1],
-                stereo_audio.shape[1],
-                source_downmix_audio.shape[1],
-            )
+            common_sample_lengths = [target_audio.shape[1], stereo_audio.shape[1]]
+            if source_downmix_audio is not None:
+                common_sample_lengths.append(source_downmix_audio.shape[1])
+            common_samples = min(common_sample_lengths)
             target_audio = target_audio[:, :common_samples]
             stereo_audio = stereo_audio[:, :common_samples]
-            source_downmix_audio = source_downmix_audio[:, :common_samples]
-            source_mono_audio = reduce_stereo_to_mono(
-                stereo_audio=stereo_audio, mode=args.mono_reduction
-            )
+            if source_downmix_audio is not None:
+                source_downmix_audio = source_downmix_audio[:, :common_samples]
+            source_mono_audio: torch.Tensor | None = None
+            if save_source_mono:
+                source_mono_audio = reduce_stereo_to_mono(
+                    stereo_audio=stereo_audio, mode=args.mono_reduction
+                )
+                source_mono_audio = duplicate_mono_to_stereo_width(source_mono_audio)
 
-            print("  - Encoding target (per-channel, stored as [C,D,T]) ...")
-            target_channel_latents = encode_channels_independent(
-                vae=vae,
-                audio=target_audio,
-                sample_rate=args.sample_rate,
-                use_sample=args.use_sample,
-                use_chunked_encode=use_chunked_encode,
-                chunk_size_samples=args.encode_chunk_size_samples,
-                overlap_samples=args.encode_overlap_samples,
-                offload_latent_to_cpu=offload_latent_to_cpu,
-                show_progress=args.show_progress,
-                device=encode_device,
+            print("  - Saving continuous waveforms [C,S] ...")
+            target_signal = ensure_cs_signal(
+                target_audio,
+                "target_signal",
             )
-            target_latent = ensure_cdt_latent(target_channel_latents, "target_latent")
-
-            print("  - Encoding source stereo/mono/downmix ...")
-            source_stereo_latent = vae_encode(
-                vae=vae,
-                audio=stereo_audio,
-                sample_rate=args.sample_rate,
-                use_sample=args.use_sample,
-                use_chunked_encode=use_chunked_encode,
-                chunk_size_samples=args.encode_chunk_size_samples,
-                overlap_samples=args.encode_overlap_samples,
-                offload_latent_to_cpu=offload_latent_to_cpu,
-                show_progress=args.show_progress,
-                device=encode_device,
+            source_stereo_signal = ensure_cs_signal(
+                stereo_audio,
+                "source_stereo_signal",
             )
-            source_mono_latent = vae_encode(
-                vae=vae,
-                audio=source_mono_audio,
-                sample_rate=args.sample_rate,
-                use_sample=args.use_sample,
-                use_chunked_encode=use_chunked_encode,
-                chunk_size_samples=args.encode_chunk_size_samples,
-                overlap_samples=args.encode_overlap_samples,
-                offload_latent_to_cpu=offload_latent_to_cpu,
-                show_progress=args.show_progress,
-                device=encode_device,
+            source_mono_signal = (
+                ensure_cs_signal(
+                    source_mono_audio,
+                    "source_mono_signal",
+                )
+                if source_mono_audio is not None
+                else None
             )
-            source_downmix_latent = vae_encode(
-                vae=vae,
-                audio=source_downmix_audio,
-                sample_rate=args.sample_rate,
-                use_sample=args.use_sample,
-                use_chunked_encode=use_chunked_encode,
-                chunk_size_samples=args.encode_chunk_size_samples,
-                overlap_samples=args.encode_overlap_samples,
-                offload_latent_to_cpu=offload_latent_to_cpu,
-                show_progress=args.show_progress,
-                device=encode_device,
-            )
-            source_stereo_latent = ensure_cdt_latent(
-                source_stereo_latent, "source_stereo_latent"
-            )
-            source_mono_latent = ensure_cdt_latent(
-                source_mono_latent, "source_mono_latent"
-            )
-            source_downmix_latent = ensure_cdt_latent(
-                source_downmix_latent, "source_downmix_latent"
+            source_downmix_signal = (
+                ensure_cs_signal(
+                    source_downmix_audio,
+                    "source_downmix_signal",
+                )
+                if source_downmix_audio is not None
+                else None
             )
 
             (
-                target_latent,
-                source_stereo_latent,
-                source_mono_latent,
-                source_downmix_latent,
-            ) = align_latent_lengths(
-                target_latent=target_latent,
-                source_stereo_latent=source_stereo_latent,
-                source_mono_latent=source_mono_latent,
-                source_downmix_latent=source_downmix_latent,
+                target_signal,
+                source_stereo_signal,
+                source_mono_signal,
+                source_downmix_signal,
+            ) = align_signal_lengths(
+                target_signal=target_signal,
+                source_stereo_signal=source_stereo_signal,
+                source_mono_signal=source_mono_signal,
+                source_downmix_signal=source_downmix_signal,
+            )
+            assert_finite_signal(target_signal, "target_signal")
+            assert_finite_signal(source_stereo_signal, "source_stereo_signal")
+            assert_finite_signal(source_mono_signal, "source_mono_signal")
+            assert_finite_signal(source_downmix_signal, "source_downmix_signal")
+            mix_style_raw = compute_mix_style_raw(
+                audio=target_signal.float(),
+                sample_rate=int(args.sample_rate),
+                channel_labels=channel_labels,
             )
 
             sample_dir.mkdir(parents=True, exist_ok=True)
-            target_latent_cpu = target_latent.to(
-                dtype=latent_dtype, device="cpu"
+            target_signal_cpu = target_signal.to(
+                dtype=signal_dtype, device="cpu"
             ).contiguous()
-            source_stereo_latent_cpu = source_stereo_latent.to(
-                dtype=latent_dtype, device="cpu"
+            source_stereo_signal_cpu = source_stereo_signal.to(
+                dtype=signal_dtype, device="cpu"
             ).contiguous()
-            source_mono_latent_cpu = source_mono_latent.to(
-                dtype=latent_dtype, device="cpu"
-            ).contiguous()
-            source_downmix_latent_cpu = source_downmix_latent.to(
-                dtype=latent_dtype, device="cpu"
-            ).contiguous()
+            source_mono_signal_cpu = (
+                source_mono_signal.to(dtype=signal_dtype, device="cpu").contiguous()
+                if source_mono_signal is not None
+                else None
+            )
+            source_downmix_signal_cpu = (
+                source_downmix_signal.to(dtype=signal_dtype, device="cpu").contiguous()
+                if source_downmix_signal is not None
+                else None
+            )
 
             if args.sample_artifact_mode == "split":
-                torch.save(target_latent_cpu, latent_paths["target"])
-                torch.save(source_stereo_latent_cpu, latent_paths["source_stereo"])
-                torch.save(source_mono_latent_cpu, latent_paths["source_mono"])
-                torch.save(source_downmix_latent_cpu, latent_paths["source_downmix"])
+                torch.save(target_signal_cpu, signal_paths["target"])
+                torch.save(source_stereo_signal_cpu, signal_paths["source_stereo"])
+                if source_mono_signal_cpu is not None:
+                    torch.save(source_mono_signal_cpu, signal_paths["source_mono"])
+                else:
+                    safe_unlink(signal_paths["source_mono"])
+                if source_downmix_signal_cpu is not None:
+                    torch.save(source_downmix_signal_cpu, signal_paths["source_downmix"])
+                else:
+                    safe_unlink(signal_paths["source_downmix"])
                 artifact_files = {
-                    "target_latent": TARGET_LATENT_FILENAME,
-                    "source_stereo_latent": SOURCE_STEREO_LATENT_FILENAME,
-                    "source_mono_latent": SOURCE_MONO_LATENT_FILENAME,
-                    "source_downmix_latent": SOURCE_DOWNMIX_LATENT_FILENAME,
+                    "target_signal": TARGET_SIGNAL_FILENAME,
+                    "source_stereo_signal": SOURCE_STEREO_SIGNAL_FILENAME,
                     "metadata": METADATA_FILENAME,
                 }
+                if source_mono_signal_cpu is not None:
+                    artifact_files["source_mono_signal"] = SOURCE_MONO_SIGNAL_FILENAME
+                if source_downmix_signal_cpu is not None:
+                    artifact_files["source_downmix_signal"] = (
+                        SOURCE_DOWNMIX_SIGNAL_FILENAME
+                    )
             elif args.sample_artifact_mode == "bundle":
-                torch.save(
-                    {
-                        "target_latent": target_latent_cpu,
-                        "source_stereo_latent": source_stereo_latent_cpu,
-                        "source_mono_latent": source_mono_latent_cpu,
-                        "source_downmix_latent": source_downmix_latent_cpu,
-                    },
-                    bundle_path,
-                )
+                bundle_payload = {
+                    "target_signal": target_signal_cpu,
+                    "source_stereo_signal": source_stereo_signal_cpu,
+                }
+                if source_mono_signal_cpu is not None:
+                    bundle_payload["source_mono_signal"] = source_mono_signal_cpu
+                if source_downmix_signal_cpu is not None:
+                    bundle_payload["source_downmix_signal"] = source_downmix_signal_cpu
+                torch.save(bundle_payload, bundle_path)
                 artifact_files = {
                     "sample_bundle": SAMPLE_BUNDLE_FILENAME,
                     "metadata": METADATA_FILENAME,
                 }
+            elif args.sample_artifact_mode == "flac":
+                write_signal_flac(
+                    signal_paths["target_flac"],
+                    target_signal,
+                    int(args.sample_rate),
+                )
+                write_signal_flac(
+                    signal_paths["source_stereo_flac"],
+                    source_stereo_signal,
+                    int(args.sample_rate),
+                )
+                if source_mono_signal is not None:
+                    write_signal_flac(
+                        signal_paths["source_mono_flac"],
+                        source_mono_signal,
+                        int(args.sample_rate),
+                    )
+                else:
+                    safe_unlink(signal_paths["source_mono_flac"])
+                if source_downmix_signal is not None:
+                    write_signal_flac(
+                        signal_paths["source_downmix_flac"],
+                        source_downmix_signal,
+                        int(args.sample_rate),
+                    )
+                else:
+                    safe_unlink(signal_paths["source_downmix_flac"])
+                artifact_files = {
+                    "target_signal": TARGET_SIGNAL_FLAC_FILENAME,
+                    "source_stereo_signal": SOURCE_STEREO_SIGNAL_FLAC_FILENAME,
+                    "metadata": METADATA_FILENAME,
+                }
+                if source_mono_signal is not None:
+                    artifact_files["source_mono_signal"] = SOURCE_MONO_SIGNAL_FLAC_FILENAME
+                if source_downmix_signal is not None:
+                    artifact_files["source_downmix_signal"] = (
+                        SOURCE_DOWNMIX_SIGNAL_FLAC_FILENAME
+                    )
             else:
                 raise ValueError(
                     f"Unsupported sample artifact mode: {args.sample_artifact_mode!r}"
@@ -1423,9 +1446,9 @@ def main() -> None:
                 "created_utc": datetime.now(timezone.utc).isoformat(),
                 "stream_hash_algorithm": args.stream_hash_algorithm,
                 "stream_hash": stream_hash,
-                "latent_layout": "c_d_t",
-                "target_latent_layout": "c_d_t",
-                "source_latent_layout": "c_d_t",
+                "signal_layout": "c_s",
+                "target_signal_layout": "c_s",
+                "source_signal_layout": "c_s",
                 "source_path": str(in_file),
                 "source_relpath": source_relpath_for_file(
                     in_file=in_file,
@@ -1437,6 +1460,8 @@ def main() -> None:
                 "source_render_path": str(stereo_render) if args.keep_renders else None,
                 "sample_rate": args.sample_rate,
                 "mono_reduction": args.mono_reduction,
+                "source_mono_saved": source_mono_signal is not None,
+                "source_downmix_saved": source_downmix_signal is not None,
                 "allow_dead_channels": args.allow_dead_channels,
                 "allow_duplicate_channels": args.allow_duplicate_channels,
                 "dead_channel_threshold": args.dead_channel_threshold,
@@ -1445,44 +1470,71 @@ def main() -> None:
                 "target_channels": int(target_audio.shape[0]),
                 "target_channel_layout_config": args.target_output_layout,
                 "target_channel_labels": channel_labels,
+                "target_channel_mask": channel_mask_for_order(channel_labels),
+                "target_is_binaural_stereo": target_is_binaural_stereo,
+                "mix_style_layout_mode": mix_style_layout_mode,
+                "mix_style_names": mix_style_names,
+                "mix_style_inactive_names": mix_style_inactive_names,
+                "mix_style_raw": mix_style_raw,
                 "ac3_matrix_version": AC3_MATRIX_VERSION,
                 "input_samples": int(common_samples),
-                "target_latent_shape": [int(x) for x in target_latent.shape],
-                "source_stereo_latent_shape": [
-                    int(x) for x in source_stereo_latent.shape
+                "target_signal_shape": [int(x) for x in target_signal.shape],
+                "source_stereo_signal_shape": [
+                    int(x) for x in source_stereo_signal.shape
                 ],
-                "source_mono_latent_shape": [int(x) for x in source_mono_latent.shape],
-                "source_downmix_latent_shape": [
-                    int(x) for x in source_downmix_latent.shape
-                ],
-                "latent_dtype": str(latent_dtype).replace("torch.", ""),
+                "signal_dtype": str(signal_dtype).replace("torch.", ""),
+                "signal_codec": (
+                    "flac_pcm24"
+                    if args.sample_artifact_mode == "flac"
+                    else "torch_tensor"
+                ),
                 "sample_artifact_mode": args.sample_artifact_mode,
                 "files": artifact_files,
             }
+            if source_mono_signal is not None:
+                metadata["source_mono_signal_shape"] = [
+                    int(x) for x in source_mono_signal.shape
+                ]
+            if source_downmix_signal is not None:
+                metadata["source_downmix_signal_shape"] = [
+                    int(x) for x in source_downmix_signal.shape
+                ]
             with open(metadata_path, "w", encoding="utf-8") as handle:
                 json.dump(metadata, handle, indent=2, ensure_ascii=True)
 
+            manifest_record = {
+                "created_utc": metadata["created_utc"],
+                "stream_hash": stream_hash,
+                "signal_layout": metadata["signal_layout"],
+                "sample_dir": str(sample_dir.relative_to(dataset_root)),
+                "source_relpath": metadata["source_relpath"],
+                "target_channels": metadata["target_channels"],
+                "target_channel_labels": metadata["target_channel_labels"],
+                "target_channel_mask": metadata["target_channel_mask"],
+                "target_is_binaural_stereo": metadata["target_is_binaural_stereo"],
+                "mix_style_layout_mode": metadata["mix_style_layout_mode"],
+                "mix_style_names": metadata["mix_style_names"],
+                "mix_style_inactive_names": metadata["mix_style_inactive_names"],
+                "target_signal_shape": metadata["target_signal_shape"],
+                "source_stereo_signal_shape": metadata["source_stereo_signal_shape"],
+                "source_mono_saved": metadata["source_mono_saved"],
+                "source_downmix_saved": metadata["source_downmix_saved"],
+                "mix_style_raw": metadata["mix_style_raw"],
+                "sample_artifact_mode": metadata["sample_artifact_mode"],
+                "dead_channel_indices": dead_channels,
+                "duplicate_channel_pairs": metadata["duplicate_channel_pairs"],
+            }
+            if "source_downmix_signal_shape" in metadata:
+                manifest_record["source_downmix_signal_shape"] = metadata[
+                    "source_downmix_signal_shape"
+                ]
+            if "source_mono_signal_shape" in metadata:
+                manifest_record["source_mono_signal_shape"] = metadata[
+                    "source_mono_signal_shape"
+                ]
             append_manifest_record(
                 manifest_file=manifest_file,
-                payload={
-                    "created_utc": metadata["created_utc"],
-                    "stream_hash": stream_hash,
-                    "latent_layout": metadata["latent_layout"],
-                    "sample_dir": str(sample_dir.relative_to(dataset_root)),
-                    "source_relpath": metadata["source_relpath"],
-                    "target_channels": metadata["target_channels"],
-                    "target_latent_shape": metadata["target_latent_shape"],
-                    "source_stereo_latent_shape": metadata[
-                        "source_stereo_latent_shape"
-                    ],
-                    "source_mono_latent_shape": metadata["source_mono_latent_shape"],
-                    "source_downmix_latent_shape": metadata[
-                        "source_downmix_latent_shape"
-                    ],
-                    "sample_artifact_mode": metadata["sample_artifact_mode"],
-                    "dead_channel_indices": dead_channels,
-                    "duplicate_channel_pairs": metadata["duplicate_channel_pairs"],
-                },
+                payload=manifest_record,
             )
             hash_store.record(stream_hash=stream_hash, in_file=in_file)
             failure_store.remove(stream_hash)
@@ -1490,8 +1542,8 @@ def main() -> None:
             counters["success"] += 1
             print(
                 "  - OK sample "
-                f"hash={stream_hash} target={tuple(target_latent.shape)} "
-                f"source={tuple(source_stereo_latent.shape)}"
+                f"hash={stream_hash} target={tuple(target_signal.shape)} "
+                f"source={tuple(source_stereo_signal.shape)}"
             )
 
         except Exception as error:

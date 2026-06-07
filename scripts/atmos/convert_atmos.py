@@ -8,6 +8,7 @@ if __package__ is None or __package__ == "":
 
 from scripts.atmos.atmos_utils import (
     DEFAULT_AUDIO_FORMAT,
+    DEFAULT_CAVERNIZE_TIMEOUT_SEC,
     DEFAULT_CAVERNIZE_EXE,
     DEFAULT_EXTENSIONS,
     DEFAULT_FFMPEG_EXE,
@@ -60,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--audio-format", default=DEFAULT_AUDIO_FORMAT)
+    parser.add_argument(
+        "--cavernize-timeout-sec",
+        type=float,
+        default=DEFAULT_CAVERNIZE_TIMEOUT_SEC,
+        help="Per-render Cavernize timeout in seconds.",
+    )
     parser.add_argument(
         "--force-24-bit", action="store_true", default=DEFAULT_FORCE_24_BIT
     )
@@ -209,6 +216,7 @@ def main() -> None:
                 audio_format=args.audio_format,
                 force_24_bit=args.force_24_bit,
                 log_file=log_output_layout,
+                timeout_sec=args.cavernize_timeout_sec,
             )
             if ok:
                 print(
@@ -239,6 +247,7 @@ def main() -> None:
                 audio_format=args.audio_format,
                 force_24_bit=args.force_24_bit,
                 log_file=log_input_layout,
+                timeout_sec=args.cavernize_timeout_sec,
             )
             if ok:
                 print(

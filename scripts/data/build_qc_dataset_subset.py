@@ -12,10 +12,10 @@ from typing import Any
 
 METADATA_FILENAME = "metadata.json"
 MANIFEST_FILENAME = "manifest.jsonl"
-TARGET_LATENT_FILENAME = "target_latent.pt"
-SOURCE_STEREO_LATENT_FILENAME = "source_stereo_latent.pt"
-SOURCE_MONO_LATENT_FILENAME = "source_mono_latent.pt"
-SOURCE_DOWNMIX_LATENT_FILENAME = "source_downmix_latent.pt"
+TARGET_SIGNAL_FILENAME = "target_signal.pt"
+SOURCE_STEREO_SIGNAL_FILENAME = "source_stereo_signal.pt"
+SOURCE_MONO_SIGNAL_FILENAME = "source_mono_signal.pt"
+SOURCE_DOWNMIX_SIGNAL_FILENAME = "source_downmix_signal.pt"
 SAMPLE_BUNDLE_FILENAME = "sample_bundle.pt"
 
 
@@ -152,10 +152,8 @@ def filter_qc_rows(
 
 def split_sample_artifacts_exist(sample_dir: Path) -> bool:
     required = [
-        sample_dir / TARGET_LATENT_FILENAME,
-        sample_dir / SOURCE_STEREO_LATENT_FILENAME,
-        sample_dir / SOURCE_MONO_LATENT_FILENAME,
-        sample_dir / SOURCE_DOWNMIX_LATENT_FILENAME,
+        sample_dir / TARGET_SIGNAL_FILENAME,
+        sample_dir / SOURCE_STEREO_SIGNAL_FILENAME,
         sample_dir / METADATA_FILENAME,
     ]
     return all(path.exists() for path in required)
@@ -425,14 +423,14 @@ def build_fallback_manifest_record(
     payload = {
         "created_utc": metadata.get("created_utc"),
         "stream_hash": record.stream_hash,
-        "latent_layout": metadata.get("latent_layout", "c_d_t"),
+        "signal_layout": metadata.get("signal_layout", "c_s"),
         "sample_dir": sample_dir_relative,
         "source_relpath": metadata.get("source_relpath", metadata.get("source_path", "")),
         "target_channels": metadata.get("target_channels"),
-        "target_latent_shape": metadata.get("target_latent_shape"),
-        "source_stereo_latent_shape": metadata.get("source_stereo_latent_shape"),
-        "source_mono_latent_shape": metadata.get("source_mono_latent_shape"),
-        "source_downmix_latent_shape": metadata.get("source_downmix_latent_shape"),
+        "target_signal_shape": metadata.get("target_signal_shape"),
+        "source_stereo_signal_shape": metadata.get("source_stereo_signal_shape"),
+        "source_mono_signal_shape": metadata.get("source_mono_signal_shape"),
+        "source_downmix_signal_shape": metadata.get("source_downmix_signal_shape"),
         "sample_artifact_mode": metadata.get("sample_artifact_mode"),
         "dead_channel_indices": metadata.get("dead_channel_indices"),
         "duplicate_channel_pairs": metadata.get("duplicate_channel_pairs"),

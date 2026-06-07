@@ -14,26 +14,14 @@ from scripts.data.preprocess_dataset import (
     DEFAULT_DATASET_ROOT,
     METADATA_FILENAME,
     SAMPLE_BUNDLE_FILENAME,
-    SOURCE_DOWNMIX_LATENT_FILENAME,
-    SOURCE_MONO_LATENT_FILENAME,
-    SOURCE_STEREO_LATENT_FILENAME,
-    TARGET_LATENT_FILENAME,
+    SOURCE_DOWNMIX_SIGNAL_FILENAME,
+    SOURCE_MONO_SIGNAL_FILENAME,
+    SOURCE_STEREO_SIGNAL_FILENAME,
+    TARGET_SIGNAL_FILENAME,
     sample_dir_from_stream_hash,
 )
-from stereo2spatial.codecs.ear_vae import (
-    decode_channels_independent,
-    get_default_device,
-    load_vae,
-    vae_decode,
-)
-
-try:
-    import soundfile as sf
-except ModuleNotFoundError as error:
-    raise ModuleNotFoundError(
-        "Missing dependency: soundfile. Install with `pip install soundfile`."
-    ) from error
-
+from stereo2spatial.common.channel_layouts import channel_labels_for_layout
+from stereo2spatial.inference.audio import write_audio_channels_first
 
 def parse_stream_hash(raw_hash: str) -> str:
     value = raw_hash.strip().lower()
@@ -62,69 +50,51 @@ def load_metadata(sample_dir: Path) -> dict:
     if not metadata_path.exists():
         raise FileNotFoundError(f"Missing metadata: {metadata_path}")
     with open(metadata_path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise TypeError(f"Invalid metadata payload: {type(payload)}")
+    return payload
 
 
-def to_cdt(tensor: torch.Tensor, name: str) -> torch.Tensor:
-    if tensor.dim() == 3:
+def torch_load_cpu(path: Path) -> object:
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def to_signal(tensor: torch.Tensor, name: str) -> torch.Tensor:
+    if tensor.dim() in {2, 3}:
         return tensor.contiguous()
-    raise ValueError(f"{name} must have shape [C,D,T], got {tuple(tensor.shape)}")
+    raise ValueError(f"{name} must have shape [C,S] or [C,P,T], got {tuple(tensor.shape)}")
 
 
-def to_bdt(tensor: torch.Tensor, name: str) -> torch.Tensor:
-    if tensor.dim() == 3:
-        return tensor.contiguous()
-    if tensor.dim() == 2:
-        return tensor.unsqueeze(0).contiguous()
-    raise ValueError(
-        f"{name} must have shape [D,T] or [B,D,T], got {tuple(tensor.shape)}"
+def unpatch_signal(signal_cpt: torch.Tensor, sample_count: int | None) -> torch.Tensor:
+    if signal_cpt.dim() == 2:
+        audio = signal_cpt.contiguous()
+        if sample_count is not None:
+            return audio[:, :sample_count].contiguous()
+        return audio
+    if signal_cpt.dim() != 3:
+        raise ValueError(f"signal must have shape [C,S] or [C,P,T], got {tuple(signal_cpt.shape)}")
+    audio = signal_cpt.permute(0, 2, 1).reshape(signal_cpt.shape[0], -1).contiguous()
+    if sample_count is not None:
+        return audio[:, :sample_count].contiguous()
+    return audio
+
+
+def write_qc_wav(
+    path: Path,
+    audio: torch.Tensor,
+    sample_rate: int,
+    channel_order: list[str] | None = None,
+) -> None:
+    write_audio_channels_first(
+        audio_path=path,
+        audio=audio.float(),
+        sample_rate=sample_rate,
+        channel_order=channel_order,
     )
-
-
-def reduce_stereo_to_mono(stereo: torch.Tensor, mode: str) -> torch.Tensor:
-    if stereo.dim() != 2 or stereo.shape[0] != 2:
-        raise ValueError(f"Expected stereo [2,S], got {tuple(stereo.shape)}")
-    if mode == "mean":
-        return stereo.mean(dim=0, keepdim=True)
-    if mode == "left":
-        return stereo[0:1, :]
-    if mode == "right":
-        return stereo[1:2, :]
-    raise ValueError("mono reduction must be one of: mean, left, right")
-
-
-def decode_stereo_like(
-    vae: torch.nn.Module,
-    latents: torch.Tensor,
-    use_chunked_decode: bool,
-    chunk_size_frames: int,
-    overlap_frames: int,
-    show_progress: bool,
-    device: torch.device,
-) -> torch.Tensor:
-    decoded = vae_decode(
-        vae=vae,
-        pred_latents=to_bdt(latents, "stereo_like_latents"),
-        use_chunked_decode=use_chunked_decode,
-        chunk_size_frames=chunk_size_frames,
-        overlap_frames=overlap_frames,
-        offload_wav_to_cpu=True,
-        normalize_audio=False,
-        return_cpu_list=False,
-        show_progress=show_progress,
-        device=device,
-    )
-    if decoded.dim() == 3:
-        return decoded[0].contiguous()
-    if decoded.dim() == 2:
-        return decoded.contiguous()
-    raise ValueError(f"Unexpected decoded shape: {tuple(decoded.shape)}")
-
-
-def tensor_to_soundfile_array(audio_cs: torch.Tensor) -> torch.Tensor:
-    if audio_cs.dim() != 2:
-        raise ValueError(f"Expected [C,S], got {tuple(audio_cs.shape)}")
-    return audio_cs.transpose(0, 1).contiguous().cpu().numpy()
 
 
 def safe_stem(raw_path: str) -> str:
@@ -133,50 +103,61 @@ def safe_stem(raw_path: str) -> str:
     return cleaned or "sample"
 
 
-def load_latents(sample_dir: Path) -> dict[str, torch.Tensor]:
+def load_signals(sample_dir: Path) -> dict[str, torch.Tensor]:
     bundle_path = sample_dir / SAMPLE_BUNDLE_FILENAME
     if bundle_path.exists():
-        bundle = torch.load(bundle_path, map_location="cpu")
+        bundle = torch_load_cpu(bundle_path)
         if not isinstance(bundle, dict):
             raise TypeError(f"Invalid sample bundle payload: {type(bundle)}")
         required = {
-            "target_latent",
-            "source_stereo_latent",
-            "source_mono_latent",
-            "source_downmix_latent",
+            "target_signal",
+            "source_stereo_signal",
         }
         missing = [key for key in required if key not in bundle]
         if missing:
             raise KeyError(f"Bundle missing keys: {missing}")
-        return {
-            "target_latent": bundle["target_latent"],
-            "source_stereo_latent": bundle["source_stereo_latent"],
-            "source_mono_latent": bundle["source_mono_latent"],
-            "source_downmix_latent": bundle["source_downmix_latent"],
+        signals = {
+            "target_signal": to_signal(bundle["target_signal"], "target_signal"),
+            "source_stereo_signal": to_signal(
+                bundle["source_stereo_signal"], "source_stereo_signal"
+            ),
         }
+        if "source_mono_signal" in bundle:
+            signals["source_mono_signal"] = to_signal(
+                bundle["source_mono_signal"], "source_mono_signal"
+            )
+        if "source_downmix_signal" in bundle:
+            signals["source_downmix_signal"] = to_signal(
+                bundle["source_downmix_signal"], "source_downmix_signal"
+            )
+        return signals
 
     split_paths = {
-        "target_latent": sample_dir / TARGET_LATENT_FILENAME,
-        "source_stereo_latent": sample_dir / SOURCE_STEREO_LATENT_FILENAME,
-        "source_mono_latent": sample_dir / SOURCE_MONO_LATENT_FILENAME,
-        "source_downmix_latent": sample_dir / SOURCE_DOWNMIX_LATENT_FILENAME,
+        "target_signal": sample_dir / TARGET_SIGNAL_FILENAME,
+        "source_stereo_signal": sample_dir / SOURCE_STEREO_SIGNAL_FILENAME,
     }
     missing_files = [str(path) for path in split_paths.values() if not path.exists()]
     if missing_files:
         raise FileNotFoundError(
-            "Missing latent artifacts and no bundle found:\n  - "
+            "Missing signal artifacts and no bundle found:\n  - "
             + "\n  - ".join(missing_files)
         )
+    source_mono_path = sample_dir / SOURCE_MONO_SIGNAL_FILENAME
+    if source_mono_path.exists():
+        split_paths["source_mono_signal"] = source_mono_path
+    source_downmix_path = sample_dir / SOURCE_DOWNMIX_SIGNAL_FILENAME
+    if source_downmix_path.exists():
+        split_paths["source_downmix_signal"] = source_downmix_path
     return {
-        name: torch.load(path, map_location="cpu") for name, path in split_paths.items()
+        name: to_signal(torch_load_cpu(path), name) for name, path in split_paths.items()
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Decode one processed sample into QC WAVs: target multichannel, "
-            "source stereo, source mono, and source downmix."
+            "Write one processed waveform sample into QC WAVs: target multichannel, "
+            "source stereo, source mono when present, and source downmix when present."
         )
     )
     parser.add_argument(
@@ -193,44 +174,7 @@ def main() -> None:
     parser.add_argument(
         "--out-dir",
         default=None,
-        help="Output folder for decoded WAVs. Defaults to <sample-dir>/_qc_decodes.",
-    )
-    parser.add_argument(
-        "--vae-checkpoint-path",
-        required=True,
-        help="Path to EAR_VAE checkpoint.",
-    )
-    parser.add_argument(
-        "--vae-config-path",
-        default=None,
-        help="Optional path to VAE config JSON.",
-    )
-    parser.add_argument(
-        "--device",
-        default=None,
-        help="Torch device for decoding (for example: cuda, cpu). Defaults to auto.",
-    )
-    parser.add_argument(
-        "--disable-chunked-decode",
-        action="store_true",
-        help="Disable chunked VAE decode.",
-    )
-    parser.add_argument(
-        "--decode-chunk-size-frames",
-        type=int,
-        default=2048,
-        help="Chunk size in latent frames for chunked decode.",
-    )
-    parser.add_argument(
-        "--decode-overlap-frames",
-        type=int,
-        default=256,
-        help="Overlap in latent frames for chunked decode.",
-    )
-    parser.add_argument(
-        "--show-progress",
-        action="store_true",
-        help="Show decode progress bars.",
+        help="Output folder for QC WAVs. Defaults to <sample-dir>/_qc_waveforms.",
     )
     args = parser.parse_args()
 
@@ -240,87 +184,42 @@ def main() -> None:
         raise FileNotFoundError(f"Sample dir not found: {sample_dir}")
 
     metadata = load_metadata(sample_dir)
-    latents = load_latents(sample_dir)
+    signals = load_signals(sample_dir)
 
     sample_rate = int(metadata.get("sample_rate", 48000))
+    sample_count = metadata.get("input_samples")
+    input_samples = int(sample_count) if isinstance(sample_count, int) else None
     target_layout = str(metadata.get("target_layout", "unknown_layout"))
-    mono_reduction = str(metadata.get("mono_reduction", "mean")).strip().lower()
+    target_channel_labels_raw = metadata.get("target_channel_labels")
+    target_channel_labels = (
+        [str(label) for label in target_channel_labels_raw]
+        if isinstance(target_channel_labels_raw, list)
+        else channel_labels_for_layout(
+            target_layout,
+            int(signals["target_signal"].shape[0]),
+        )
+    )
     stream_hash = str(metadata.get("stream_hash", sample_dir.name))
     source_path = str(metadata.get("source_path", ""))
 
     out_dir = (
         Path(args.out_dir).resolve(strict=False)
         if args.out_dir
-        else sample_dir / "_qc_decodes"
+        else sample_dir / "_qc_waveforms"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    decode_device = torch.device(args.device) if args.device else get_default_device()
-    print(f"Loading VAE on device={decode_device} ...")
-    vae = load_vae(
-        vae_checkpoint_path=args.vae_checkpoint_path,
-        config_path=args.vae_config_path,
-        device=decode_device,
-        torch_dtype=torch.float32,
+    target_audio = unpatch_signal(signals["target_signal"], input_samples)
+    source_stereo_audio = unpatch_signal(signals["source_stereo_signal"], input_samples)
+    source_mono_audio = (
+        unpatch_signal(signals["source_mono_signal"], input_samples)
+        if "source_mono_signal" in signals
+        else None
     )
-    print("VAE loaded.")
-
-    use_chunked_decode = not args.disable_chunked_decode
-
-    target_latent = to_cdt(latents["target_latent"], "target_latent")
-    source_stereo_latent = to_bdt(
-        latents["source_stereo_latent"], "source_stereo_latent"
-    )
-    source_mono_latent = to_bdt(latents["source_mono_latent"], "source_mono_latent")
-    source_downmix_latent = to_bdt(
-        latents["source_downmix_latent"], "source_downmix_latent"
-    )
-
-    print("Decoding target multichannel latents ...")
-    target_audio = decode_channels_independent(
-        vae=vae,
-        channel_latents=target_latent,
-        use_chunked_decode=use_chunked_decode,
-        chunk_size_frames=args.decode_chunk_size_frames,
-        overlap_frames=args.decode_overlap_frames,
-        offload_wav_to_cpu=True,
-        reduction="mean",
-        show_progress=args.show_progress,
-        device=decode_device,
-    )
-
-    print("Decoding source stereo latent ...")
-    source_stereo_audio = decode_stereo_like(
-        vae=vae,
-        latents=source_stereo_latent,
-        use_chunked_decode=use_chunked_decode,
-        chunk_size_frames=args.decode_chunk_size_frames,
-        overlap_frames=args.decode_overlap_frames,
-        show_progress=args.show_progress,
-        device=decode_device,
-    )
-
-    print("Decoding source mono latent ...")
-    source_mono_stereo_audio = decode_stereo_like(
-        vae=vae,
-        latents=source_mono_latent,
-        use_chunked_decode=use_chunked_decode,
-        chunk_size_frames=args.decode_chunk_size_frames,
-        overlap_frames=args.decode_overlap_frames,
-        show_progress=args.show_progress,
-        device=decode_device,
-    )
-    source_mono_audio = reduce_stereo_to_mono(source_mono_stereo_audio, mono_reduction)
-
-    print("Decoding source downmix latent ...")
-    source_downmix_audio = decode_stereo_like(
-        vae=vae,
-        latents=source_downmix_latent,
-        use_chunked_decode=use_chunked_decode,
-        chunk_size_frames=args.decode_chunk_size_frames,
-        overlap_frames=args.decode_overlap_frames,
-        show_progress=args.show_progress,
-        device=decode_device,
+    source_downmix_audio = (
+        unpatch_signal(signals["source_downmix_signal"], input_samples)
+        if "source_downmix_signal" in signals
+        else None
     )
 
     prefix = safe_stem(source_path) + "__" + stream_hash[:12]
@@ -328,65 +227,62 @@ def main() -> None:
     if not target_suffix:
         target_suffix = "target"
 
-    target_wav = out_dir / f"{prefix}__decoded_{target_suffix}.wav"
-    stereo_wav = out_dir / f"{prefix}__decoded_stereo.wav"
-    mono_wav = out_dir / f"{prefix}__decoded_mono.wav"
-    downmix_wav = out_dir / f"{prefix}__decoded_downmix.wav"
+    target_wav = out_dir / f"{prefix}__waveform_{target_suffix}.wav"
+    stereo_wav = out_dir / f"{prefix}__waveform_stereo.wav"
+    mono_wav = out_dir / f"{prefix}__waveform_mono.wav"
+    downmix_wav = out_dir / f"{prefix}__waveform_downmix.wav"
 
-    sf.write(
+    write_qc_wav(
         target_wav,
-        tensor_to_soundfile_array(target_audio),
+        target_audio,
         sample_rate,
-        subtype="FLOAT",
+        channel_order=target_channel_labels,
     )
-    sf.write(
-        stereo_wav,
-        tensor_to_soundfile_array(source_stereo_audio),
-        sample_rate,
-        subtype="FLOAT",
-    )
-    sf.write(
-        mono_wav,
-        tensor_to_soundfile_array(source_mono_audio),
-        sample_rate,
-        subtype="FLOAT",
-    )
-    sf.write(
-        downmix_wav,
-        tensor_to_soundfile_array(source_downmix_audio),
-        sample_rate,
-        subtype="FLOAT",
-    )
+    write_qc_wav(stereo_wav, source_stereo_audio, sample_rate)
+    if source_mono_audio is not None:
+        write_qc_wav(mono_wav, source_mono_audio, sample_rate)
+    if source_downmix_audio is not None:
+        write_qc_wav(downmix_wav, source_downmix_audio, sample_rate)
 
+    audio_shapes = {
+        "target": [int(x) for x in target_audio.shape],
+        "source_stereo": [int(x) for x in source_stereo_audio.shape],
+    }
+    output_files = {
+        "target": str(target_wav),
+        "source_stereo": str(stereo_wav),
+    }
+    if source_mono_audio is not None:
+        audio_shapes["source_mono"] = [int(x) for x in source_mono_audio.shape]
+        output_files["source_mono"] = str(mono_wav)
+    if source_downmix_audio is not None:
+        audio_shapes["source_downmix"] = [int(x) for x in source_downmix_audio.shape]
+        output_files["source_downmix"] = str(downmix_wav)
     report = {
         "sample_dir": str(sample_dir),
         "stream_hash": stream_hash,
         "source_path": source_path,
         "sample_rate": sample_rate,
         "target_layout": target_layout,
-        "mono_reduction": mono_reduction,
-        "decoded_shapes": {
-            "target": [int(x) for x in target_audio.shape],
-            "source_stereo": [int(x) for x in source_stereo_audio.shape],
-            "source_mono": [int(x) for x in source_mono_audio.shape],
-            "source_downmix": [int(x) for x in source_downmix_audio.shape],
+        "target_channel_labels": target_channel_labels,
+        "input_samples": input_samples,
+        "signal_shapes": {
+            name: [int(x) for x in tensor.shape] for name, tensor in signals.items()
         },
-        "output_files": {
-            "target": str(target_wav),
-            "source_stereo": str(stereo_wav),
-            "source_mono": str(mono_wav),
-            "source_downmix": str(downmix_wav),
-        },
+        "audio_shapes": audio_shapes,
+        "output_files": output_files,
     }
-    report_path = out_dir / f"{prefix}__decode_report.json"
+    report_path = out_dir / f"{prefix}__waveform_report.json"
     with open(report_path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, ensure_ascii=True)
 
-    print("Wrote QC decodes:")
+    print("Wrote QC waveforms:")
     print(f"  - {target_wav}")
     print(f"  - {stereo_wav}")
-    print(f"  - {mono_wav}")
-    print(f"  - {downmix_wav}")
+    if source_mono_audio is not None:
+        print(f"  - {mono_wav}")
+    if source_downmix_audio is not None:
+        print(f"  - {downmix_wav}")
     print(f"  - {report_path}")
 
 

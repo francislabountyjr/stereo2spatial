@@ -10,6 +10,7 @@ provided by each script's CLI flags (for example:
 """
 
 import re
+import os
 import subprocess
 from pathlib import Path
 from shutil import which
@@ -19,6 +20,7 @@ DEFAULT_CAVERNIZE_EXE = r"C:\Program Files\VoidX\Cavernize\CavernizeGUI.exe"
 DEFAULT_FFMPEG_EXE = "ffmpeg"
 DEFAULT_AUDIO_FORMAT = "PCM_Float"
 DEFAULT_FORCE_24_BIT = False
+DEFAULT_CAVERNIZE_TIMEOUT_SEC = 600.0
 DEFAULT_SLEEP_BETWEEN_RUNS_SEC = 1.0
 DEFAULT_SKIP_IF_EXISTS_OVER_BYTES = 1 * 1024 * 1024
 DEFAULT_STREAM_HASH_FILENAME = "_processed_stream_hashes.tsv"
@@ -165,6 +167,7 @@ def run_cavernize(
     audio_format: str,
     force_24_bit: bool,
     log_file: Path,
+    timeout_sec: float | None = DEFAULT_CAVERNIZE_TIMEOUT_SEC,
 ) -> tuple[bool, str]:
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -188,22 +191,60 @@ def run_cavernize(
         log_handle.flush()
 
         try:
-            process = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 text=True,
-                check=False,
             )
+            try:
+                returncode = process.wait(timeout=timeout_sec)
+            except subprocess.TimeoutExpired:
+                log_handle.write(
+                    f"\nTIMEOUT: Cavernize exceeded {timeout_sec:.1f}s; terminating.\n"
+                )
+                _terminate_process_tree(process)
+                safe_unlink(out_file)
+                return False, f"timeout={timeout_sec:.1f}s"
+
             ok = (
-                process.returncode == 0
+                returncode == 0
                 and out_file.exists()
                 and out_file.stat().st_size > 1024
             )
-            return ok, f"exit={process.returncode}"
+            if not ok:
+                safe_unlink(out_file)
+            return ok, f"exit={returncode}"
         except Exception as error:
             log_handle.write(f"\nEXCEPTION: {error!r}\n")
+            safe_unlink(out_file)
             return False, f"exception={type(error).__name__}"
+
+
+def safe_unlink(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    else:
+        process.kill()
+    try:
+        process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
 
 
 def mirrored_out_dir(input_root: Path, output_root: Path, in_file: Path) -> Path:
