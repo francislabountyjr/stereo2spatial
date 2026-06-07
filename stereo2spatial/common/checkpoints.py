@@ -11,19 +11,28 @@ def adapt_state_dict_keys_for_model(
     model: torch.nn.Module,
     state_dict: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
-    """Strip common wrappers (for example ``module.``) when needed."""
+    """Strip common wrapper prefixes until keys match the target model."""
     expected_keys = set(model.state_dict().keys())
     loaded_keys = set(state_dict.keys())
     if loaded_keys == expected_keys:
         return state_dict
 
-    for prefix in ("_orig_mod.", "module."):
-        if not any(key.startswith(prefix) for key in loaded_keys):
-            continue
-        adapted = {
-            (key[len(prefix) :] if key.startswith(prefix) else key): value
-            for key, value in state_dict.items()
-        }
+    prefixes = ("module.", "_orig_mod.")
+    adapted = state_dict
+    for _ in range(4):
+        changed = False
+        next_adapted: dict[str, torch.Tensor] = {}
+        for key, value in adapted.items():
+            next_key = key
+            for prefix in prefixes:
+                if next_key.startswith(prefix):
+                    next_key = next_key[len(prefix) :]
+                    changed = True
+                    break
+            next_adapted[next_key] = value
+        if not changed:
+            break
+        adapted = next_adapted
         if set(adapted.keys()) == expected_keys:
             return adapted
 

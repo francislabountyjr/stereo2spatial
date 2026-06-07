@@ -16,7 +16,12 @@ def segment_starts(
 
     starts = list(range(0, total_frames - window_frames + 1, stride_frames))
     last_start = total_frames - window_frames
-    if starts[-1] != last_start:
+    if starts[-1] == last_start:
+        return starts
+
+    if len(starts) >= 2 and starts[-2] + window_frames >= last_start:
+        starts[-1] = last_start
+    else:
         starts.append(last_start)
     return starts
 
