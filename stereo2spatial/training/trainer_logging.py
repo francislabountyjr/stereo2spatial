@@ -9,7 +9,7 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
 from .config import TrainConfig
-from .dataset import LatentSongDataset
+from .dataset import WaveformSongDataset
 from .trainer_settings import TrainerRuntimeSettings
 
 
@@ -17,7 +17,7 @@ def log_training_setup(
     *,
     accelerator: Accelerator,
     config: TrainConfig,
-    dataset: LatentSongDataset,
+    dataset: WaveformSongDataset,
     dataloader: DataLoader,
     validation_dataloader: DataLoader | None,
     optimizer: torch.optim.Optimizer,
@@ -91,18 +91,45 @@ def log_training_setup(
     print(f"  - corr_eps={settings.corr_eps}")
     print(f"  - corr_offdiag_only={settings.corr_offdiag_only}")
     print(f"  - corr_use_correlation={settings.corr_use_correlation}")
+    print(f"  - downmix_consistency_weight={settings.downmix_consistency_weight}")
+    print(f"  - mrstft_loss_weight={settings.mrstft_loss_weight}")
+    print(f"  - perceptual_loss_weight={settings.perceptual_loss_weight}")
+    print(f"  - binaural_ild_loss_weight={settings.binaural_ild_loss_weight}")
+    print(f"  - binaural_ipd_loss_weight={settings.binaural_ipd_loss_weight}")
+    print(f"  - binaural_ccf_loss_weight={settings.binaural_ccf_loss_weight}")
 
     if isinstance(optimizer, torch.optim.AdamW):
         print(f"  - adamw_fused={bool(optimizer.defaults.get('fused', False))}")
         print(f"  - adamw_foreach={bool(optimizer.defaults.get('foreach', False))}")
+    elif config.optimizer.type.strip().lower() == "muon":
+        print(f"  - muon_ns_steps={config.optimizer.muon_ns_steps}")
+        print(f"  - muon_nesterov={config.optimizer.muon_nesterov}")
 
     print(f"  - segment_seconds={config.data.segment_seconds}")
-    print(f"  - resolved_latent_fps={dataset.resolved_latent_fps:.6f}")
+    print(f"  - resolved_patch_fps={dataset.resolved_patch_fps:.6f}")
     print(f"  - dataset_sequence_seconds={dataset.sequence_seconds}")
     print(f"  - dataset_sequence_frames={dataset.sequence_frames}")
     print(f"  - stride_seconds={dataset.stride_seconds}")
     print(f"  - stride_frames={dataset.stride_frames}")
+    print(
+        "  - shuffle_segments_within_song="
+        f"{config.data.shuffle_segments_within_song}"
+    )
+    print(
+        "  - source_resample_augmentation="
+        f"{config.data.source_resample_aug_enabled} "
+        f"p={config.data.source_resample_aug_probability} "
+        f"rates={config.data.source_resample_aug_rates}"
+    )
+    print(f"  - amplitude_lift_enabled={config.data.amplitude_lift_enabled}")
+    if config.data.amplitude_lift_enabled:
+        print(f"  - amplitude_lift_reference={config.data.amplitude_lift_reference}")
+        print(f"  - amplitude_lift_target_rms={config.data.amplitude_lift_target_rms}")
+        print(f"  - amplitude_lift_scale={config.data.amplitude_lift_scale}")
+        print(f"  - amplitude_lift_clip_value={config.data.amplitude_lift_clip_value}")
     print(f"  - batch_size_per_process={config.data.batch_size}")
+    print(f"  - dataloader_batch_mode={config.data.batch_mode}")
+    print(f"  - materialize_cached_signals={config.data.materialize_cached_signals}")
     print(
         "  - dataloader_prefetch_factor="
         f"{config.data.prefetch_factor if config.data.num_workers > 0 else 'n/a(num_workers=0)'}"
@@ -126,6 +153,7 @@ def log_training_setup(
 
     print(f"  - run_validation_generations={settings.run_validation_generations}")
     if settings.run_validation_generations:
+        print(f"  - validation_generation_steps={settings.validation_steps}")
         print(
             f"  - validation_generation_input_path={config.training.validation_generation_input_path}"
         )

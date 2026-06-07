@@ -1,4 +1,4 @@
-"""Validation helpers for latent-loss and audio generation checks."""
+"""Validation helpers for signal-loss and audio generation checks."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
 from .config import TrainConfig
-from .dataset import LatentSongDataset
+from .dataset import WaveformSongDataset
+from .ema import EMATeacher
 from .losses import _compute_batch_flow_matching_loss
 
 _AUDIO_SUFFIXES = {".wav", ".flac", ".aif", ".aiff", ".ogg", ".mp3", ".m4a"}
@@ -17,8 +18,8 @@ _AUDIO_SUFFIXES = {".wav", ".flac", ".aif", ".aiff", ".ogg", ".mp3", ".m4a"}
 
 def _build_validation_dataset(
     config: TrainConfig,
-    training_dataset: LatentSongDataset,
-) -> LatentSongDataset:
+    training_dataset: WaveformSongDataset,
+) -> WaveformSongDataset:
     """Construct validation dataset mirroring training sequence/window semantics."""
     validation_dataset_root = config.training.validation_dataset_root
     validation_dataset_path = config.training.validation_dataset_path
@@ -27,26 +28,35 @@ def _build_validation_dataset(
             "Validation dataset root/path are required when run_validation is enabled."
         )
 
-    return LatentSongDataset(
+    return WaveformSongDataset(
         dataset_root=validation_dataset_root,
         manifest_path=validation_dataset_path,
         sample_artifact_mode=config.data.sample_artifact_mode,
         segment_seconds=config.data.segment_seconds,
-        latent_fps=config.data.latent_fps,
+        patch_fps=float(config.data.sample_rate) / float(config.model.patch_size),
+        patch_size=config.model.patch_size,
         mono_probability=0.0,
         downmix_probability=0.0,
         cache_size=config.data.cache_size,
         shuffle_segments_within_epoch=False,
+        shuffle_segments_within_song=False,
         seed=config.seed + 100_000,
+        materialize_cached_signals=config.data.materialize_cached_signals,
         sequence_seconds=training_dataset.sequence_seconds,
         stride_seconds=training_dataset.stride_seconds,
         sequence_mode=training_dataset.sequence_mode,
         full_song_max_seconds=training_dataset.full_song_max_seconds,
+        amplitude_lift_enabled=config.data.amplitude_lift_enabled,
+        amplitude_lift_reference=config.data.amplitude_lift_reference,
+        amplitude_lift_target_rms=config.data.amplitude_lift_target_rms,
+        amplitude_lift_scale=config.data.amplitude_lift_scale,
+        amplitude_lift_clip_value=config.data.amplitude_lift_clip_value,
+        amplitude_lift_eps=config.data.amplitude_lift_eps,
     )
 
 
 @torch.no_grad()
-def _run_latent_validation(
+def _run_signal_validation(
     accelerator: Accelerator,
     model: torch.nn.Module,
     dataloader: DataLoader,
@@ -59,7 +69,7 @@ def _run_latent_validation(
     global_step: int,
     window_metadata: dict[int, tuple[list[int], list[torch.Tensor]]] | None = None,
 ) -> tuple[float, int]:
-    """Evaluate mean latent validation loss across the validation dataloader."""
+    """Evaluate mean signal validation loss across the validation dataloader."""
     was_training = model.training
     model.eval()
     try:
@@ -83,6 +93,34 @@ def _run_latent_validation(
                 force_full_sequence=True,
                 scheduled_sampling_config=config.training,
                 enable_scheduled_sampling=False,
+                downmix_consistency_weight=config.training.downmix_consistency_weight,
+                downmix_consistency_loss=config.training.downmix_consistency_loss,
+                downmix_channel_order=config.training.downmix_channel_order,
+                mrstft_loss_weight=config.training.mrstft_loss_weight,
+                mrstft_fft_sizes=config.training.mrstft_fft_sizes,
+                mrstft_hop_lengths=config.training.mrstft_hop_lengths,
+                mrstft_win_lengths=config.training.mrstft_win_lengths,
+                mrstft_sc_weight=config.training.mrstft_sc_weight,
+                mrstft_log_mag_weight=config.training.mrstft_log_mag_weight,
+                mrstft_eps=config.training.mrstft_eps,
+                perceptual_loss_weight=config.training.perceptual_loss_weight,
+                perceptual_sample_rate=config.data.sample_rate,
+                perceptual_n_fft=config.training.perceptual_n_fft,
+                perceptual_hop_length=config.training.perceptual_hop_length,
+                perceptual_win_length=config.training.perceptual_win_length,
+                perceptual_n_mels=config.training.perceptual_n_mels,
+                perceptual_f_min=config.training.perceptual_f_min,
+                perceptual_f_max=config.training.perceptual_f_max,
+                perceptual_band_weight=config.training.perceptual_band_weight,
+                perceptual_band_low_hz=config.training.perceptual_band_low_hz,
+                perceptual_band_high_hz=config.training.perceptual_band_high_hz,
+                perceptual_eps=config.training.perceptual_eps,
+                binaural_ild_loss_weight=config.training.binaural_ild_loss_weight,
+                binaural_ipd_loss_weight=config.training.binaural_ipd_loss_weight,
+                binaural_ccf_loss_weight=config.training.binaural_ccf_loss_weight,
+                binaural_loss_warmup_steps=config.training.binaural_loss_warmup_steps,
+                binaural_sample_rate=config.data.sample_rate,
+                binaural_loss_eps=config.training.binaural_loss_eps,
             )
             local_loss_sum += loss.detach().to(dtype=torch.float64)
             local_batch_count += 1
@@ -124,63 +162,67 @@ def _run_generation_validation(
     model: torch.nn.Module,
     config: TrainConfig,
     global_step: int,
+    ema_teacher: EMATeacher | None = None,
 ) -> tuple[int, int]:
     """Run periodic audio generation validation and return success/error counts."""
-    from stereo2spatial.codecs.ear_vae import (
-        decode_channels_independent,
-        load_vae,
-        vae_encode,
+    from stereo2spatial.common.amplitude_lift import (
+        apply_amplitude_lift,
+        compute_shared_rms_gain,
+        undo_amplitude_lift,
     )
-    from stereo2spatial.inference import (
-        generate_spatial_latent,
+    from stereo2spatial.inference.audio import (
         read_audio_channels_first,
+        write_audio_channels_first,
+    )
+    from stereo2spatial.inference.runner import (
+        _patch_audio,
+        _prepare_conditioning_audio,
+        _resolve_inference_solver,
+        _unpatch_audio,
+    )
+    from stereo2spatial.inference.sampling import (
+        generate_spatial_signal,
         resolve_chunk_frames,
     )
-    from stereo2spatial.inference.audio import write_audio_channels_first
 
     input_root = Path(config.training.validation_generation_input_path or "")
     output_root = Path(config.training.validation_generation_output_path or "")
-    vae_checkpoint_path = config.training.validation_generation_vae_checkpoint_path
-    vae_config_path = config.training.validation_generation_vae_config_path
-    if vae_checkpoint_path is None:
-        raise ValueError(
-            "training.validation_generation_vae_checkpoint_path must be set for "
-            "run_validation_generations=true"
-        )
-
     audio_paths = _list_validation_audio_files(input_root)
     if not audio_paths:
         return 0, 0
 
-    raw_model = accelerator.unwrap_model(model)
+    raw_model = (
+        ema_teacher.model
+        if ema_teacher is not None
+        else accelerator.unwrap_model(model)
+    )
     was_training = raw_model.training
     raw_model.eval()
     try:
-        model_device: torch.device
         try:
             model_device = next(raw_model.parameters()).device
         except StopIteration:
             model_device = accelerator.device
 
-        vae = load_vae(
-            vae_checkpoint_path=vae_checkpoint_path,
-            config_path=vae_config_path,
-            device=model_device,
-            torch_dtype=torch.float32,
+        sample_rate = int(config.data.sample_rate)
+        chunk_seconds = (
+            float(config.training.validation_generation_chunk_seconds)
+            if config.training.validation_generation_chunk_seconds is not None
+            else float(config.data.segment_seconds)
         )
-
-        sample_rate = 48_000
-        chunk_seconds = float(config.data.segment_seconds)
-        overlap_seconds = 0.5
-        solver = "dopri5"
-        solver_steps = 64
-        solver_rtol = 1e-5
-        solver_atol = 1e-5
+        overlap_seconds = float(config.training.validation_generation_overlap_seconds)
+        solver = _resolve_inference_solver(
+            requested_solver=config.training.validation_generation_solver
+        )
+        solver_steps = int(config.training.validation_generation_solver_steps)
+        solver_rtol = float(config.training.validation_generation_solver_rtol)
+        solver_atol = float(config.training.validation_generation_solver_atol)
 
         generated_count = 0
         error_count = 0
         step_root = output_root / f"step_{global_step:07d}"
         step_root.mkdir(parents=True, exist_ok=True)
+        output_suffix = ".flac" if int(config.model.target_channels) == 2 else ".wav"
 
         for generation_idx in range(int(config.training.num_valid_generations)):
             seed = int(config.training.validation_generation_seed) + generation_idx
@@ -192,46 +234,63 @@ def _run_generation_validation(
                         audio_path=input_audio_path,
                         target_sample_rate=sample_rate,
                     )
-                    if audio.shape[0] not in {1, 2}:
-                        raise ValueError(
-                            f"Input must be mono or stereo. Got channels={audio.shape[0]}"
-                        )
-
-                    cond_latent = vae_encode(
-                        vae=vae,
-                        audio=audio,
-                        sample_rate=actual_sample_rate,
-                        use_sample=False,
-                        use_chunked_encode=True,
-                        chunk_size_samples=None,
-                        overlap_samples=None,
-                        duplicate_mono_to_stereo=True,
-                        offload_latent_to_cpu=False,
-                        show_progress=False,
-                        device=model_device,
+                    conditioning_audio = _prepare_conditioning_audio(
+                        audio.float(),
+                        cond_channels=int(config.model.cond_channels),
                     )
-                    if cond_latent.dim() != 2:
-                        raise ValueError(
-                            "Expected conditioning latent [D,T], "
-                            f"got {tuple(cond_latent.shape)}"
+                    amplitude_lift_gain = None
+                    if bool(getattr(config.data, "amplitude_lift_enabled", False)):
+                        lift_reference = str(
+                            getattr(config.data, "amplitude_lift_reference", "source")
+                        ).strip().lower()
+                        if lift_reference != "source":
+                            raise ValueError(
+                                "Validation generation amplitude lifting requires "
+                                "data.amplitude_lift_reference='source' because "
+                                "target audio is unavailable."
+                            )
+                        amplitude_lift_gain = compute_shared_rms_gain(
+                            conditioning_audio,
+                            target_rms=float(
+                                getattr(
+                                    config.data,
+                                    "amplitude_lift_target_rms",
+                                    0.33,
+                                )
+                            ),
+                            eps=float(
+                                getattr(config.data, "amplitude_lift_eps", 1.0e-8)
+                            ),
                         )
-
-                    cond_latent = cond_latent.unsqueeze(0).contiguous()  # [1,D,T]
-                    latent_fps = (
-                        float(actual_sample_rate)
-                        * float(cond_latent.shape[-1])
-                        / float(audio.shape[-1])
+                        conditioning_audio = apply_amplitude_lift(
+                            conditioning_audio,
+                            gain=amplitude_lift_gain,
+                            scale=float(
+                                getattr(config.data, "amplitude_lift_scale", 3.0)
+                            ),
+                            clip_value=getattr(
+                                config.data,
+                                "amplitude_lift_clip_value",
+                                4.0,
+                            ),
+                        )
+                    cond_signal, input_samples = _patch_audio(
+                        conditioning_audio,
+                        patch_size=int(config.model.patch_size),
+                    )
+                    patch_fps = float(actual_sample_rate) / float(
+                        config.model.patch_size
                     )
                     chunk_frames, overlap_frames = resolve_chunk_frames(
-                        cond_latent_frames=cond_latent.shape[-1],
-                        latent_fps=latent_fps,
+                        cond_signal_frames=cond_signal.shape[-1],
+                        patch_fps=patch_fps,
                         chunk_seconds=chunk_seconds,
                         overlap_seconds=overlap_seconds,
                     )
 
-                    pred_latent = generate_spatial_latent(
+                    pred_signal = generate_spatial_signal(
                         model=raw_model,
-                        cond_latent=cond_latent.to(model_device),
+                        cond_signal=cond_signal.to(model_device),
                         chunk_frames=chunk_frames,
                         overlap_frames=overlap_frames,
                         solver=solver,
@@ -240,20 +299,26 @@ def _run_generation_validation(
                         solver_atol=solver_atol,
                         seed=seed,
                     )
-                    decoded = decode_channels_independent(
-                        vae=vae,
-                        channel_latents=pred_latent.to(model_device),
-                        use_chunked_decode=True,
-                        chunk_size_frames=2048,
-                        overlap_frames=256,
-                        offload_wav_to_cpu=True,
-                        reduction="mean",
-                        show_progress=False,
-                        device=model_device,
-                    ).float()
+                    decoded = _unpatch_audio(
+                        pred_signal.cpu().float(),
+                        sample_count=input_samples,
+                    )
+                    if amplitude_lift_gain is not None:
+                        decoded = undo_amplitude_lift(
+                            decoded,
+                            gain=amplitude_lift_gain.cpu(),
+                            scale=float(
+                                getattr(config.data, "amplitude_lift_scale", 3.0)
+                            ),
+                            eps=float(
+                                getattr(config.data, "amplitude_lift_eps", 1.0e-8)
+                            ),
+                        )
 
                     rel_path = input_audio_path.relative_to(input_root)
-                    output_audio_path = (seed_root / rel_path).with_suffix(".wav")
+                    output_audio_path = (seed_root / rel_path).with_suffix(
+                        output_suffix
+                    )
                     output_audio_path.parent.mkdir(parents=True, exist_ok=True)
                     write_audio_channels_first(
                         audio_path=output_audio_path,

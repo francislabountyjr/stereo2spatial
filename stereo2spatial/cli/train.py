@@ -11,7 +11,7 @@ from stereo2spatial.training.trainer import train
 def build_parser() -> argparse.ArgumentParser:
     """Build the training CLI argument parser."""
     parser = argparse.ArgumentParser(
-        description=("Train the stereo-to-spatial latent transformer model.")
+        description=("Train the stereo-to-spatial waveform-patch transformer model.")
     )
     parser.add_argument(
         "--config",
@@ -46,3 +46,7 @@ def main() -> None:
         resume_from_checkpoint=args.resume_from,
         init_from_checkpoint=args.init_from,
     )
+
+
+if __name__ == "__main__":
+    main()

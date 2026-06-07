@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from .config import TrainConfig
-from .dataset import LatentSongDataset
+from .dataset import WaveformSongDataset
 from .windowing import _build_window_metadata
 
 
@@ -29,10 +29,10 @@ class SequenceTrainingPlan:
 def build_sequence_training_plan(
     *,
     config: TrainConfig,
-    dataset: LatentSongDataset,
+    dataset: WaveformSongDataset,
 ) -> SequenceTrainingPlan:
     """Resolve per-batch temporal slicing and overlap parameters."""
-    fps = float(dataset.resolved_latent_fps)
+    fps = float(dataset.resolved_patch_fps)
     sequence_mode = (
         str(getattr(config.training, "sequence_mode", "strided_crops")).strip().lower()
     )

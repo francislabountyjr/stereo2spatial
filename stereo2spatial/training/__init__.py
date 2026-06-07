@@ -3,12 +3,12 @@
 from stereo2spatial.modeling import SpatialDiT
 
 from .config import TrainConfig, load_config
-from .dataset import ConditioningSource, LatentSongDataset
+from .dataset import ConditioningSource, WaveformSongDataset
 
 __all__ = [
     "ConditioningSource",
     "TrainConfig",
     "SpatialDiT",
-    "LatentSongDataset",
+    "WaveformSongDataset",
     "load_config",
 ]

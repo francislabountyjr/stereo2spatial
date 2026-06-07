@@ -18,6 +18,7 @@ from stereo2spatial.common.windowing import (
 _ALLOWED_ROLLOUT_STRATEGIES = {"uniform", "biased_early", "biased_late"}
 _ALLOWED_RAMP_SHAPES = {"linear", "cosine"}
 _ALLOWED_SAMPLERS = {"euler", "heun", "unipc"}
+_CLEAN_PREDICTION_EPS = 1e-4
 
 
 def _iter_wrapped_modules(model: torch.nn.Module) -> tuple[object, ...]:
@@ -98,6 +99,89 @@ def _init_rollout_memory(
     return None
 
 
+def _clean_prediction_to_velocity(
+    *,
+    clean_prediction: torch.Tensor,
+    zt: torch.Tensor,
+    t: torch.Tensor,
+) -> torch.Tensor:
+    """Convert clean endpoint predictions to rectified-flow velocities."""
+    if t.dim() != 1:
+        raise ValueError(f"t must be rank-1 [B], got {tuple(t.shape)}")
+    view_shape = (t.shape[0],) + (1,) * (zt.dim() - 1)
+    denom = (1.0 - t.to(dtype=zt.dtype, device=zt.device)).view(view_shape)
+    return (clean_prediction - zt) / denom.clamp_min(_CLEAN_PREDICTION_EPS)
+
+
+def _predict_clean(
+    *,
+    model: torch.nn.Module,
+    zt: torch.Tensor,
+    t: torch.Tensor,
+    z_cond: torch.Tensor,
+    valid_mask: torch.Tensor,
+    mem: torch.Tensor | None,
+    use_memory: bool,
+    mix_style: torch.Tensor | None = None,
+    mix_style_mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Run one clean-prediction model call with optional recurrent memory."""
+    kwargs = {"zt": zt, "t": t, "z_cond": z_cond, "valid_mask": valid_mask}
+    if mix_style is not None:
+        kwargs["mix_style"] = mix_style
+    if mix_style_mask is not None:
+        kwargs["mix_style_mask"] = mix_style_mask
+    if not use_memory:
+        return (cast(torch.Tensor, model(**kwargs)), mem)
+
+    kwargs["mem"] = mem
+    kwargs["return_mem"] = True
+    prediction = model(**kwargs)
+    if not isinstance(prediction, tuple) or len(prediction) != 2:
+        raise RuntimeError(
+            "Model with memory tokens must return (prediction, memory) when return_mem=True."
+        )
+    clean_prediction, next_mem = prediction
+    return cast(torch.Tensor, clean_prediction), cast(torch.Tensor | None, next_mem)
+
+
+def _predict_clean_probe(
+    *,
+    model: torch.nn.Module,
+    zt: torch.Tensor,
+    t: torch.Tensor,
+    z_cond: torch.Tensor,
+    valid_mask: torch.Tensor,
+    mem: torch.Tensor | None,
+    use_memory: bool,
+    mix_style: torch.Tensor | None = None,
+    mix_style_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Run one clean-prediction call without mutating recurrent memory state.
+
+    Used for provisional predictor states in multi-eval solvers
+    (for example, Heun/UniPC) where only accepted states should
+    advance memory.
+    """
+    kwargs = {"zt": zt, "t": t, "z_cond": z_cond, "valid_mask": valid_mask}
+    if mix_style is not None:
+        kwargs["mix_style"] = mix_style
+    if mix_style_mask is not None:
+        kwargs["mix_style_mask"] = mix_style_mask
+    if not use_memory:
+        return cast(torch.Tensor, model(**kwargs))
+    kwargs["mem"] = mem
+    kwargs["return_mem"] = True
+    prediction = model(**kwargs)
+    if not isinstance(prediction, tuple) or len(prediction) != 2:
+        raise RuntimeError(
+            "Model with memory tokens must return (prediction, memory) when return_mem=True."
+        )
+    clean_prediction, _ = prediction
+    return cast(torch.Tensor, clean_prediction)
+
+
 def _predict_velocity(
     *,
     model: torch.nn.Module,
@@ -107,36 +191,25 @@ def _predict_velocity(
     valid_mask: torch.Tensor,
     mem: torch.Tensor | None,
     use_memory: bool,
+    mix_style: torch.Tensor | None = None,
+    mix_style_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Run one model call with optional recurrent-memory state threading."""
-    if not use_memory:
-        return (
-            cast(
-                torch.Tensor,
-                model(
-                    zt=zt,
-                    t=t,
-                    z_cond=z_cond,
-                    valid_mask=valid_mask,
-                ),
-            ),
-            mem,
-        )
-
-    prediction = model(
+    """Run clean prediction and convert it to the velocity used by rollout."""
+    clean_prediction, next_mem = _predict_clean(
+        model=model,
         zt=zt,
         t=t,
         z_cond=z_cond,
         valid_mask=valid_mask,
         mem=mem,
-        return_mem=True,
+        use_memory=use_memory,
+        mix_style=mix_style,
+        mix_style_mask=mix_style_mask,
     )
-    if not isinstance(prediction, tuple) or len(prediction) != 2:
-        raise RuntimeError(
-            "Model with memory tokens must return (prediction, memory) when return_mem=True."
-        )
-    velocity, next_mem = prediction
-    return cast(torch.Tensor, velocity), cast(torch.Tensor | None, next_mem)
+    return (
+        _clean_prediction_to_velocity(clean_prediction=clean_prediction, zt=zt, t=t),
+        next_mem,
+    )
 
 
 def _predict_velocity_probe(
@@ -148,38 +221,22 @@ def _predict_velocity_probe(
     valid_mask: torch.Tensor,
     mem: torch.Tensor | None,
     use_memory: bool,
+    mix_style: torch.Tensor | None = None,
+    mix_style_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """
-    Run one model call without mutating recurrent memory state.
-
-    Used for provisional predictor states in multi-eval solvers
-    (for example, Heun/UniPC) where only accepted states should
-    advance memory.
-    """
-    if not use_memory:
-        return cast(
-            torch.Tensor,
-            model(
-                zt=zt,
-                t=t,
-                z_cond=z_cond,
-                valid_mask=valid_mask,
-            ),
-        )
-    prediction = model(
+    """Probe clean prediction and convert it to the velocity used by rollout."""
+    clean_prediction = _predict_clean_probe(
+        model=model,
         zt=zt,
         t=t,
         z_cond=z_cond,
         valid_mask=valid_mask,
         mem=mem,
-        return_mem=True,
+        use_memory=use_memory,
+        mix_style=mix_style,
+        mix_style_mask=mix_style_mask,
     )
-    if not isinstance(prediction, tuple) or len(prediction) != 2:
-        raise RuntimeError(
-            "Model with memory tokens must return (prediction, memory) when return_mem=True."
-        )
-    velocity, _ = prediction
-    return cast(torch.Tensor, velocity)
+    return _clean_prediction_to_velocity(clean_prediction=clean_prediction, zt=zt, t=t)
 
 
 def _resolve_window_rollout_plan(
@@ -240,7 +297,7 @@ def _slice_and_pad_mask2d(
     return torch.cat([window, pad], dim=1)
 
 
-def _predict_velocity_windowed(
+def _predict_clean_windowed(
     *,
     model: torch.nn.Module,
     zt: torch.Tensor,
@@ -252,9 +309,11 @@ def _predict_velocity_windowed(
     use_memory: bool,
     window_frames: int,
     overlap_frames: int,
+    mix_style: torch.Tensor | None = None,
+    mix_style_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
-    Evaluate model velocity over a full sequence via overlap-add windows.
+    Evaluate clean prediction over a full sequence via overlap-add windows.
 
     Memory semantics match normal chunk processing: one committed memory update
     per window via ``return_mem=True`` when memory tokens are enabled.
@@ -291,7 +350,7 @@ def _predict_velocity_windowed(
             end=end,
             window_frames=resolved_window_frames,
         )
-        pred_w, mem_state = _predict_velocity(
+        pred_w, mem_state = _predict_clean(
             model=model,
             zt=zt_w,
             t=t_batch,
@@ -299,6 +358,8 @@ def _predict_velocity_windowed(
             valid_mask=vm_w,
             mem=mem_state,
             use_memory=use_memory,
+            mix_style=mix_style,
+            mix_style_mask=mix_style_mask,
         )
 
         weight = _common_chunk_weight(
@@ -334,6 +395,8 @@ def _rollout_to_target_with_fixed_memory(
     t_dtype: torch.dtype,
     mem: torch.Tensor | None,
     use_memory: bool,
+    mix_style: torch.Tensor | None = None,
+    mix_style_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Integrate one rollout interval while keeping recurrent memory fixed.
@@ -364,6 +427,8 @@ def _rollout_to_target_with_fixed_memory(
             valid_mask=valid_mask,
             mem=mem,
             use_memory=use_memory,
+            mix_style=mix_style,
+            mix_style_mask=mix_style_mask,
         )
         if sampler == "heun":
             euler_state = current + dt * velocity_curr
@@ -376,6 +441,8 @@ def _rollout_to_target_with_fixed_memory(
                 valid_mask=valid_mask,
                 mem=mem,
                 use_memory=use_memory,
+                mix_style=mix_style,
+                mix_style_mask=mix_style_mask,
             )
             current = current + 0.5 * dt * (velocity_curr + velocity_next)
         elif sampler == "unipc":
@@ -394,6 +461,8 @@ def _rollout_to_target_with_fixed_memory(
                 valid_mask=valid_mask,
                 mem=mem,
                 use_memory=use_memory,
+                mix_style=mix_style,
+                mix_style_mask=mix_style_mask,
             )
             if previous_velocity is None:
                 current = current + 0.5 * dt * (velocity_curr + velocity_next)
@@ -589,12 +658,14 @@ def apply_flow_matching_scheduled_sampling(
     z0: torch.Tensor,
     training_config: Any,
     global_step: int,
+    mix_style: torch.Tensor | None = None,
+    mix_style_mask: torch.Tensor | None = None,
     plan: ScheduledSamplingPlan | None = None,
     window_frames: int | None = None,
     overlap_frames: int = 0,
 ) -> ScheduledSamplingRolloutResult:
     """
-    Roll out model-generated latents from a noisier source time to target time.
+    Roll out model-generated signals from a noisier source time to target time.
 
     Rollout endpoints follow the discretized ``target_steps`` in the rollout plan.
     ``t`` is updated only for samples that actually roll out.
@@ -621,6 +692,18 @@ def apply_flow_matching_scheduled_sampling(
         or valid_mask.shape[0] != batch_size
     ):
         raise ValueError("Batch dimension mismatch across scheduled-sampling inputs.")
+    if mix_style is not None and (
+        mix_style.dim() != 2 or int(mix_style.shape[0]) != batch_size
+    ):
+        raise ValueError(
+            f"mix_style must be [B,K] with B={batch_size}, got {tuple(mix_style.shape)}"
+        )
+    if mix_style_mask is not None and (
+        mix_style_mask.dim() != 1 or int(mix_style_mask.shape[0]) != batch_size
+    ):
+        raise ValueError(
+            f"mix_style_mask must be [B] with B={batch_size}, got {tuple(mix_style_mask.shape)}"
+        )
 
     max_step_offset = int(
         getattr(training_config, "scheduled_sampling_max_step_offset", 0) or 0
@@ -717,6 +800,10 @@ def apply_flow_matching_scheduled_sampling(
         source_t = float(source_step) / time_step_denom
         cond_i = z_cond[idx : idx + 1]
         mask_i = valid_mask[idx : idx + 1]
+        mix_style_i = mix_style[idx : idx + 1] if mix_style is not None else None
+        mix_style_mask_i = (
+            mix_style_mask[idx : idx + 1] if mix_style_mask is not None else None
+        )
         clean_t_batch = torch.tensor([target_t_original], device=device, dtype=t.dtype)
         target_t_batch = torch.tensor([target_t], device=device, dtype=t.dtype)
         mem_i: torch.Tensor | None = (
@@ -744,7 +831,7 @@ def apply_flow_matching_scheduled_sampling(
                     if use_memory
                     else None
                 )
-                clean_pred, _ = _predict_velocity_windowed(
+                clean_pred, _ = _predict_clean_windowed(
                     model=model,
                     zt=zt[idx : idx + 1],
                     z_cond=cond_i,
@@ -755,9 +842,11 @@ def apply_flow_matching_scheduled_sampling(
                     use_memory=use_memory,
                     window_frames=rollout_window_frames,
                     overlap_frames=int(overlap_frames),
+                    mix_style=mix_style_i,
+                    mix_style_mask=mix_style_mask_i,
                 )
             else:
-                clean_pred, _ = _predict_velocity(
+                clean_pred, _ = _predict_clean(
                     model=model,
                     zt=zt[idx : idx + 1],
                     t=clean_t_batch,
@@ -765,6 +854,8 @@ def apply_flow_matching_scheduled_sampling(
                     valid_mask=mask_i,
                     mem=mem_i,
                     use_memory=use_memory,
+                    mix_style=mix_style_i,
+                    mix_style_mask=mix_style_mask_i,
                 )
             clean_preds[idx : idx + 1] = clean_pred.to(device=device, dtype=dtype)
 
@@ -841,10 +932,12 @@ def apply_flow_matching_scheduled_sampling(
                     t_dtype=t.dtype,
                     mem=mem_roll,
                     use_memory=use_memory,
+                    mix_style=mix_style_i,
+                    mix_style_mask=mix_style_mask_i,
                 )
 
                 if use_memory:
-                    biased_pred_w, mem_roll = _predict_velocity(
+                    biased_pred_w, mem_roll = _predict_clean(
                         model=model,
                         zt=current_w,
                         t=target_t_batch,
@@ -852,9 +945,11 @@ def apply_flow_matching_scheduled_sampling(
                         valid_mask=vm_w,
                         mem=mem_roll,
                         use_memory=True,
+                        mix_style=mix_style_i,
+                        mix_style_mask=mix_style_mask_i,
                     )
                 else:
-                    biased_pred_w, _ = _predict_velocity(
+                    biased_pred_w, _ = _predict_clean(
                         model=model,
                         zt=current_w,
                         t=target_t_batch,
@@ -862,6 +957,8 @@ def apply_flow_matching_scheduled_sampling(
                         valid_mask=vm_w,
                         mem=None,
                         use_memory=False,
+                        mix_style=mix_style_i,
+                        mix_style_mask=mix_style_mask_i,
                     )
 
                 weight = _common_chunk_weight(
@@ -919,6 +1016,8 @@ def apply_flow_matching_scheduled_sampling(
                 valid_mask=mask_i,
                 mem=mem_i,
                 use_memory=use_memory,
+                mix_style=mix_style_i,
+                mix_style_mask=mix_style_mask_i,
             )
             if sampler == "heun":
                 euler_state = current + dt * velocity_curr
@@ -931,6 +1030,8 @@ def apply_flow_matching_scheduled_sampling(
                     valid_mask=mask_i,
                     mem=mem_i,
                     use_memory=use_memory,
+                    mix_style=mix_style_i,
+                    mix_style_mask=mix_style_mask_i,
                 )
                 current = current + 0.5 * dt * (velocity_curr + velocity_next)
             elif sampler == "unipc":
@@ -949,6 +1050,8 @@ def apply_flow_matching_scheduled_sampling(
                     valid_mask=mask_i,
                     mem=mem_i,
                     use_memory=use_memory,
+                    mix_style=mix_style_i,
+                    mix_style_mask=mix_style_mask_i,
                 )
                 if previous_velocity is None:
                     current = current + 0.5 * dt * (velocity_curr + velocity_next)
@@ -964,7 +1067,7 @@ def apply_flow_matching_scheduled_sampling(
             current_t = next_t
 
         if reflex_cache_enabled and biased_preds is not None:
-            biased_pred, _ = _predict_velocity(
+            biased_pred, _ = _predict_clean(
                 model=model,
                 zt=current,
                 t=target_t_batch,
@@ -972,6 +1075,8 @@ def apply_flow_matching_scheduled_sampling(
                 valid_mask=mask_i,
                 mem=mem_i,
                 use_memory=use_memory,
+                mix_style=mix_style_i,
+                mix_style_mask=mix_style_mask_i,
             )
             biased_preds[idx : idx + 1] = biased_pred.to(device=device, dtype=dtype)
 

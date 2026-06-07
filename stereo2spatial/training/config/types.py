@@ -7,15 +7,15 @@ from dataclasses import dataclass
 
 @dataclass
 class DataConfig:
-    """Data loading and latent-sequence sampling settings."""
+    """Data loading and sequence sampling settings."""
 
-    dataset_root: str
-    manifest_path: str
+    dataset_root: str | list[str]
+    manifest_path: str | list[str]
     sample_artifact_mode: str
     segment_seconds: float
     sequence_seconds: float
     stride_seconds: float
-    latent_fps: float | str
+    sample_rate: int
     mono_probability: float
     downmix_probability: float
     cache_size: int
@@ -26,6 +26,31 @@ class DataConfig:
     pin_memory: bool
     persistent_workers: bool
     drop_last: bool
+    materialize_cached_signals: bool = False
+    shuffle_segments_within_song: bool = True
+    batch_mode: str = "standard"
+    amplitude_lift_enabled: bool = False
+    amplitude_lift_reference: str = "source"
+    amplitude_lift_target_rms: float = 0.33
+    amplitude_lift_scale: float = 3.0
+    amplitude_lift_clip_value: float | None = 4.0
+    amplitude_lift_eps: float = 1.0e-8
+    source_resample_aug_enabled: bool = False
+    source_resample_aug_probability: float = 0.0
+    source_resample_aug_rates: list[int] | None = None
+    source_resample_aug_weights: list[float] | None = None
+    source_codec_aug_enabled: bool = False
+    source_codec_aug_probability: float = 0.0
+    source_codec_aug_start_step: int = 0
+    source_codec_aug_full_strength_step: int = 0
+    source_codec_aug_backend: str = "auto"
+    source_codec_aug_ffmpeg_path: str = "ffmpeg"
+    source_codec_aug_codecs: list[str] | None = None
+    source_codec_aug_codec_weights: list[float] | None = None
+    source_codec_aug_bitrates: dict[str, list[int]] | None = None
+    source_codec_aug_max_chunk_seconds: float | None = 12.0
+    source_codec_aug_align_max_lag: int = 8192
+    source_codec_aug_timeout_seconds: float = 20.0
 
 
 @dataclass
@@ -34,7 +59,7 @@ class ModelConfig:
 
     target_channels: int
     cond_channels: int
-    latent_dim: int
+    patch_size: int
     hidden_dim: int
     num_layers: int
     num_heads: int
@@ -44,6 +69,13 @@ class ModelConfig:
     timestep_scale: float
     max_period: float
     num_memory_tokens: int
+    mix_style_dim: int = 0
+    waveform_level_depth: int = 0
+    waveform_micro_patch_size: int = 16
+    waveform_hidden_dim: int = 16
+    waveform_num_heads: int | None = None
+    waveform_mlp_ratio: float = 2.0
+    activation_checkpointing: bool = False
 
 
 @dataclass
@@ -103,8 +135,39 @@ class TrainingConfig:
     validation_generation_seed: int
     validation_generation_input_path: str | None
     validation_generation_output_path: str | None
-    validation_generation_vae_checkpoint_path: str | None
-    validation_generation_vae_config_path: str | None
+    validation_generation_solver: str = "heun"
+    validation_generation_solver_steps: int = 64
+    validation_generation_solver_rtol: float = 1e-5
+    validation_generation_solver_atol: float = 1e-5
+    validation_generation_chunk_seconds: float | None = None
+    validation_generation_overlap_seconds: float = 0.5
+    downmix_consistency_weight: float = 0.0
+    downmix_consistency_loss: str = "mse"
+    downmix_channel_order: list[str] | None = None
+    mix_style_dropout_probability: float = 0.0
+    mrstft_loss_weight: float = 0.0
+    mrstft_fft_sizes: list[int] | None = None
+    mrstft_hop_lengths: list[int] | None = None
+    mrstft_win_lengths: list[int] | None = None
+    mrstft_sc_weight: float = 1.0
+    mrstft_log_mag_weight: float = 1.0
+    mrstft_eps: float = 1e-7
+    perceptual_loss_weight: float = 0.0
+    perceptual_n_fft: int = 1024
+    perceptual_hop_length: int = 256
+    perceptual_win_length: int = 1024
+    perceptual_n_mels: int = 80
+    perceptual_f_min: float = 40.0
+    perceptual_f_max: float | None = None
+    perceptual_band_weight: float = 1.0
+    perceptual_band_low_hz: float = 150.0
+    perceptual_band_high_hz: float = 8000.0
+    perceptual_eps: float = 1e-5
+    binaural_ild_loss_weight: float = 0.0
+    binaural_ipd_loss_weight: float = 0.0
+    binaural_ccf_loss_weight: float = 0.0
+    binaural_loss_warmup_steps: int = 0
+    binaural_loss_eps: float = 1e-7
     scheduled_sampling_max_step_offset: int = 0
     scheduled_sampling_probability: float = 0.0
     scheduled_sampling_prob_start: float | None = None
@@ -150,6 +213,8 @@ class OptimizerConfig:
     eps: float
     adamw_fused: bool
     adamw_foreach: bool
+    muon_ns_steps: int = 5
+    muon_nesterov: bool = True
 
 
 @dataclass
