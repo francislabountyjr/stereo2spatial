@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from stereo2spatial.training.dataset_io import (
     SOURCE_STEREO_SIGNAL_FILENAME,
     TARGET_SIGNAL_FLAC_FILENAME,
     TARGET_SIGNAL_FILENAME,
+    _load_manifest_records,
     _load_signals_from_sample,
     _slice_with_right_pad,
 )
@@ -410,3 +412,45 @@ def test_build_epoch_segments_can_keep_song_local_crops_sorted() -> None:
             if segment.song_index == song_index
         ]
         assert starts == sorted(starts)
+
+
+def test_load_manifest_records_normalizes_windows_sample_paths(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    manifest_path = dataset_root / "manifest.jsonl"
+    dataset_root.mkdir(parents=True)
+    row = {
+        "stream_hash": "abcd",
+        "sample_dir": r"samples\ab\cd\abcd",
+        "target_signal_shape": [2, 48_000],
+    }
+    manifest_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    songs = _load_manifest_records(
+        dataset_root=dataset_root,
+        manifest_path=manifest_path,
+        patch_size=1024,
+    )
+
+    assert songs[0].sample_dir == dataset_root / "samples" / "ab" / "cd" / "abcd"
+
+
+def test_load_manifest_records_reroots_old_absolute_sample_paths(
+    tmp_path: Path,
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    manifest_path = dataset_root / "manifest.jsonl"
+    dataset_root.mkdir(parents=True)
+    row = {
+        "stream_hash": "abcd",
+        "sample_dir": r"E:\old_dataset\samples\ab\cd\abcd",
+        "target_signal_shape": [2, 48_000],
+    }
+    manifest_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    songs = _load_manifest_records(
+        dataset_root=dataset_root,
+        manifest_path=manifest_path,
+        patch_size=1024,
+    )
+
+    assert songs[0].sample_dir == dataset_root / "samples" / "ab" / "cd" / "abcd"

@@ -201,6 +201,22 @@ def _coerce_signal_rms(
     return None
 
 
+def _resolve_manifest_sample_dir(dataset_root: Path, sample_dir_raw: Any) -> Path:
+    """Resolve a manifest sample directory under the configured dataset root."""
+    raw = str(sample_dir_raw).strip()
+    normalized = raw.replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part and part != "."]
+    lower_parts = [part.lower() for part in parts]
+    if "samples" in lower_parts:
+        samples_idx = lower_parts.index("samples")
+        return dataset_root.joinpath(*parts[samples_idx:])
+
+    path = Path(normalized)
+    if path.is_absolute():
+        return path
+    return dataset_root.joinpath(*parts)
+
+
 def _load_manifest_records(
     *,
     dataset_root: Path,
@@ -220,7 +236,7 @@ def _load_manifest_records(
             sample_dir_raw = payload.get("sample_dir")
             if not sample_dir_raw:
                 raise KeyError(f"manifest line {line_idx}: missing key 'sample_dir'")
-            sample_dir = dataset_root / Path(sample_dir_raw)
+            sample_dir = _resolve_manifest_sample_dir(dataset_root, sample_dir_raw)
             target_shape = payload.get("target_signal_shape")
             if not isinstance(target_shape, list) or len(target_shape) not in {2, 3}:
                 raise ValueError(
