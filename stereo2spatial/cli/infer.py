@@ -8,6 +8,11 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from stereo2spatial.common.mix_style import (
+    mix_style_preset_description,
+    mix_style_preset_names,
+    mix_style_preset_values,
+)
 from stereo2spatial.inference import run_inference
 from stereo2spatial.inference.export_bundle import (
     DEFAULT_BUNDLE_OVERLAP_SECONDS,
@@ -31,6 +36,7 @@ SOLVER_CHOICES = (
     "explicit_adams",
     "implicit_adams",
 )
+MIX_STYLE_PRESET_CHOICES = mix_style_preset_names()
 
 
 def _safe_print(message: str) -> None:
@@ -106,6 +112,16 @@ def _parse_mix_style_json(raw: str | None) -> list[float] | dict[str, float] | N
     raise TypeError("--mix-style-json must be a JSON list or object")
 
 
+def _print_mix_style_presets() -> None:
+    """Print available mix-style presets and their normalized knob values."""
+    _safe_print("Mix-style presets:")
+    for name in MIX_STYLE_PRESET_CHOICES:
+        _safe_print(f"  - {name}: {mix_style_preset_description(name)}")
+        values = mix_style_preset_values(name)
+        knobs = ", ".join(f"{key}={value:.2f}" for key, value in values.items())
+        _safe_print(f"    {knobs}")
+
+
 def _add_model_and_io_args(parser: argparse.ArgumentParser) -> None:
     """Register model/checkpoint/input-output CLI arguments."""
     parser.add_argument(
@@ -119,7 +135,7 @@ def _add_model_and_io_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--checkpoint",
-        required=True,
+        default=None,
         help=(
             "Checkpoint path. Accepts an exported bundle directory, an Accelerate "
             "checkpoint directory (step_XXXXXXX), a .pt/.pth state-dict file, a "
@@ -129,12 +145,12 @@ def _add_model_and_io_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--input-audio",
-        required=True,
+        default=None,
         help="Path to mono or stereo input audio file.",
     )
     parser.add_argument(
         "--output-audio",
-        required=True,
+        default=None,
         help="Path to output spatial multichannel WAV file.",
     )
 
@@ -195,6 +211,20 @@ def _add_sampler_args(parser: argparse.ArgumentParser) -> None:
             "order or a JSON object keyed by mix-style name. Defaults to omitted."
         ),
     )
+    parser.add_argument(
+        "--mix-style-preset",
+        default=None,
+        choices=MIX_STYLE_PRESET_CHOICES,
+        help=(
+            "Named mix-style preset to use for conditioning. Mutually exclusive "
+            "with --mix-style-json."
+        ),
+    )
+    parser.add_argument(
+        "--list-mix-style-presets",
+        action="store_true",
+        help="Print available mix-style preset names, descriptions, and values.",
+    )
 
 
 def _add_runtime_and_reporting_args(parser: argparse.ArgumentParser) -> None:
@@ -248,6 +278,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     """Parse CLI arguments, run inference, and print/write the run report."""
     args = build_parser().parse_args()
+    if args.list_mix_style_presets:
+        _print_mix_style_presets()
+        return
+    if args.checkpoint is None or args.input_audio is None or args.output_audio is None:
+        raise SystemExit(
+            "--checkpoint, --input-audio, and --output-audio are required unless "
+            "--list-mix-style-presets is used."
+        )
+    if args.mix_style_json is not None and args.mix_style_preset is not None:
+        raise SystemExit("--mix-style-json and --mix-style-preset cannot both be used.")
     resolved_config_path = resolve_cli_config_path(
         config=args.config,
         checkpoint=args.checkpoint,
@@ -298,6 +338,7 @@ def main() -> None:
         show_progress=args.show_progress,
         normalize_peak=normalize_peak,
         mix_style=mix_style,
+        mix_style_preset=args.mix_style_preset,
         weights_source=cast(WeightsSource, args.weights_source),
     )
     report_values = dict(report)
@@ -326,6 +367,7 @@ def main() -> None:
         "overlap_frames",
         "solver",
         "seed",
+        "mix_style_preset",
         "mix_style",
     ]:
         if key == "config_path":

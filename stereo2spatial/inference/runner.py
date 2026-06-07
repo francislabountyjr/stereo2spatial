@@ -12,7 +12,11 @@ from stereo2spatial.common.amplitude_lift import (
     compute_shared_rms_gain,
     undo_amplitude_lift,
 )
-from stereo2spatial.common.mix_style import mix_style_dict_to_vector
+from stereo2spatial.common.mix_style import (
+    mix_style_active_names,
+    mix_style_dict_to_vector,
+    mix_style_preset_values,
+)
 from stereo2spatial.modeling import SpatialDiT
 from stereo2spatial.training.config import TrainConfig
 
@@ -147,6 +151,7 @@ class InferenceReport(TypedDict):
     solver_atol: float
     seed: int
     mix_style: list[float] | None
+    mix_style_preset: str | None
     amplitude_lift_enabled: bool
     amplitude_lift_reference: str
     amplitude_lift_target_rms: float
@@ -159,14 +164,25 @@ class InferenceReport(TypedDict):
 def _resolve_inference_mix_style(
     raw_mix_style: list[float] | dict[str, float] | None,
     mix_style_dim: int,
+    target_channels: int,
+    preset_name: str | None = None,
 ) -> torch.Tensor | None:
     """Return optional normalized mix-style tensor for inference."""
     if int(mix_style_dim) <= 0:
         return None
+    if preset_name is not None:
+        if raw_mix_style is not None:
+            raise ValueError("mix_style and mix_style_preset cannot both be provided")
+        raw_mix_style = mix_style_preset_values(preset_name)
     if raw_mix_style is None:
         return None
     if isinstance(raw_mix_style, dict):
-        values = mix_style_dict_to_vector(raw_mix_style)[: int(mix_style_dim)]
+        names: tuple[str, ...] | None = None
+        if int(target_channels) == 2 and int(mix_style_dim) == 10:
+            names = mix_style_active_names(layout_mode="binaural_stereo")
+        elif int(target_channels) == 6 and int(mix_style_dim) == 11:
+            names = mix_style_active_names(layout_mode="5_1_rear")
+        values = mix_style_dict_to_vector(raw_mix_style, names=names)
     else:
         values = [float(value) for value in raw_mix_style]
     if len(values) != int(mix_style_dim):
@@ -194,6 +210,7 @@ def run_inference(
     show_progress: bool,
     normalize_peak: bool,
     mix_style: list[float] | dict[str, float] | None = None,
+    mix_style_preset: str | None = None,
     weights_source: WeightsSource = "auto",
 ) -> InferenceReport:
     """
@@ -286,6 +303,8 @@ def run_inference(
     mix_style_tensor = _resolve_inference_mix_style(
         raw_mix_style=mix_style,
         mix_style_dim=int(getattr(config.model, "mix_style_dim", 0)),
+        target_channels=int(getattr(config.model, "target_channels", 0)),
+        preset_name=mix_style_preset,
     )
 
     target_chunk_seconds = (
@@ -366,6 +385,7 @@ def run_inference(
             if mix_style_tensor is not None
             else None
         ),
+        "mix_style_preset": mix_style_preset,
         "amplitude_lift_enabled": bool(
             getattr(config.data, "amplitude_lift_enabled", False)
         ),

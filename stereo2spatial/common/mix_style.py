@@ -27,6 +27,113 @@ DEFAULT_MIX_STYLE_VALUE = 0.5
 DEFAULT_MIX_STYLE_VECTOR: tuple[float, ...] = tuple(
     DEFAULT_MIX_STYLE_VALUE for _ in MIX_STYLE_NAMES
 )
+MIX_STYLE_PRESETS: dict[str, dict[str, Any]] = {
+    "balanced": {
+        "description": "Neutral corpus-normalized style with no directional bias.",
+        "values": {
+            "center_focus": 0.50,
+            "center_lock": 0.50,
+            "front_width": 0.50,
+            "surround_amount": 0.50,
+            "ambience_amount": 0.50,
+            "placement_sharpness": 0.50,
+            "spatial_contrast": 0.50,
+            "chorus_expansion": 0.50,
+            "lead_bloom": 0.50,
+            "motion_amount": 0.50,
+        },
+    },
+    "front_focus": {
+        "description": "Stable lead-focused image with reduced ambience and motion.",
+        "values": {
+            "center_focus": 0.72,
+            "center_lock": 0.75,
+            "front_width": 0.40,
+            "surround_amount": 0.32,
+            "ambience_amount": 0.30,
+            "placement_sharpness": 0.72,
+            "spatial_contrast": 0.38,
+            "chorus_expansion": 0.35,
+            "lead_bloom": 0.35,
+            "motion_amount": 0.25,
+        },
+    },
+    "wide_studio": {
+        "description": "Wider stereo-stage presentation while keeping the center controlled.",
+        "values": {
+            "center_focus": 0.55,
+            "center_lock": 0.58,
+            "front_width": 0.70,
+            "surround_amount": 0.58,
+            "ambience_amount": 0.55,
+            "placement_sharpness": 0.55,
+            "spatial_contrast": 0.52,
+            "chorus_expansion": 0.55,
+            "lead_bloom": 0.50,
+            "motion_amount": 0.42,
+        },
+    },
+    "ambient_wide": {
+        "description": "Diffuse spacious render with more ambience and less pinpoint placement.",
+        "values": {
+            "center_focus": 0.42,
+            "center_lock": 0.38,
+            "front_width": 0.68,
+            "surround_amount": 0.78,
+            "ambience_amount": 0.80,
+            "placement_sharpness": 0.28,
+            "spatial_contrast": 0.58,
+            "chorus_expansion": 0.60,
+            "lead_bloom": 0.55,
+            "motion_amount": 0.45,
+        },
+    },
+    "cinematic": {
+        "description": "Large contrast and bloom for a bigger section-to-section image.",
+        "values": {
+            "center_focus": 0.55,
+            "center_lock": 0.55,
+            "front_width": 0.62,
+            "surround_amount": 0.65,
+            "ambience_amount": 0.62,
+            "placement_sharpness": 0.48,
+            "spatial_contrast": 0.78,
+            "chorus_expansion": 0.75,
+            "lead_bloom": 0.70,
+            "motion_amount": 0.55,
+        },
+    },
+    "energetic_motion": {
+        "description": "More animated spatial changes and chorus-style expansion.",
+        "values": {
+            "center_focus": 0.48,
+            "center_lock": 0.42,
+            "front_width": 0.62,
+            "surround_amount": 0.60,
+            "ambience_amount": 0.55,
+            "placement_sharpness": 0.45,
+            "spatial_contrast": 0.72,
+            "chorus_expansion": 0.72,
+            "lead_bloom": 0.58,
+            "motion_amount": 0.78,
+        },
+    },
+    "intimate": {
+        "description": "Close, dry, centered render with minimal ambience and motion.",
+        "values": {
+            "center_focus": 0.78,
+            "center_lock": 0.82,
+            "front_width": 0.30,
+            "surround_amount": 0.22,
+            "ambience_amount": 0.20,
+            "placement_sharpness": 0.78,
+            "spatial_contrast": 0.25,
+            "chorus_expansion": 0.22,
+            "lead_bloom": 0.25,
+            "motion_amount": 0.18,
+        },
+    },
+}
 _INACTIVE_BY_MODE: dict[str, tuple[str, ...]] = {
     "5_1_rear": ("rear_depth", "height_amount"),
     "binaural_stereo": ("rear_depth", "height_amount", "lfe_amount"),
@@ -90,6 +197,28 @@ def mix_style_active_names(
     if inactive_names is not None:
         inactive.update(str(name) for name in inactive_names)
     return tuple(name for name in MIX_STYLE_NAMES if name not in inactive)
+
+
+def mix_style_preset_names() -> tuple[str, ...]:
+    """Return available named mix-style presets in display order."""
+    return tuple(MIX_STYLE_PRESETS)
+
+
+def mix_style_preset_description(name: str) -> str:
+    """Return a human-readable description for a mix-style preset."""
+    key = str(name).strip().lower().replace("-", "_")
+    if key not in MIX_STYLE_PRESETS:
+        raise KeyError(f"unknown mix-style preset: {name}")
+    return str(MIX_STYLE_PRESETS[key]["description"])
+
+
+def mix_style_preset_values(name: str) -> dict[str, float]:
+    """Return normalized knob values for a named mix-style preset."""
+    key = str(name).strip().lower().replace("-", "_")
+    if key not in MIX_STYLE_PRESETS:
+        raise KeyError(f"unknown mix-style preset: {name}")
+    values = MIX_STYLE_PRESETS[key]["values"]
+    return {str(knob): float(value) for knob, value in values.items()}
 
 
 def mix_style_inactive_names_for_layout(
@@ -630,10 +759,14 @@ def compute_mix_style_raw(
 __all__ = [
     "DEFAULT_MIX_STYLE_VALUE",
     "DEFAULT_MIX_STYLE_VECTOR",
+    "MIX_STYLE_PRESETS",
     "MIX_STYLE_NAMES",
     "compute_mix_style_raw",
     "mix_style_active_names",
     "mix_style_dict_to_vector",
     "mix_style_inactive_names_for_layout",
+    "mix_style_preset_description",
+    "mix_style_preset_names",
+    "mix_style_preset_values",
     "normalize_mix_style_raw",
 ]

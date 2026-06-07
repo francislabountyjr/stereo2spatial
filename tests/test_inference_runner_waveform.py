@@ -12,6 +12,7 @@ from stereo2spatial.inference.audio import (
 from stereo2spatial.inference.runner import (
     _patch_audio,
     _prepare_conditioning_audio,
+    _resolve_inference_mix_style,
     _resolve_inference_solver,
     _unpatch_audio,
     run_inference,
@@ -165,6 +166,31 @@ def test_prepare_conditioning_audio_maps_mono_and_stereo() -> None:
 def test_resolve_inference_solver_accepts_res6s_aliases() -> None:
     assert _resolve_inference_solver(requested_solver="res6s") == "res6s"
     assert _resolve_inference_solver(requested_solver="res_6s") == "res6s"
+
+
+def test_resolve_inference_mix_style_uses_headphone_active_order() -> None:
+    mix_style = _resolve_inference_mix_style(
+        raw_mix_style=None,
+        mix_style_dim=10,
+        target_channels=2,
+        preset_name="intimate",
+    )
+
+    assert mix_style is not None
+    assert mix_style.shape == (1, 10)
+    assert mix_style.flatten().tolist() == pytest.approx(
+        [0.78, 0.82, 0.30, 0.22, 0.20, 0.78, 0.25, 0.22, 0.25, 0.18]
+    )
+
+
+def test_resolve_inference_mix_style_rejects_preset_and_json() -> None:
+    with pytest.raises(ValueError, match="cannot both be provided"):
+        _resolve_inference_mix_style(
+            raw_mix_style={"center_focus": 0.5},
+            mix_style_dim=10,
+            target_channels=2,
+            preset_name="balanced",
+        )
 
 
 def test_run_inference_writes_direct_waveform_output(tmp_path: Path) -> None:
