@@ -1,56 +1,91 @@
 seed: 1337
-output_dir: runs/train
+output_dir: runs/train_headphone_virtualizer
 
 data:
-  dataset_root: dataset
-  manifest_path: dataset/manifest.jsonl
-  sample_artifact_mode: bundle
+  datasets:
+    - dataset_root: dataset/stereo2spatial_headphone_virtualizer
+      manifest_path: dataset/stereo2spatial_headphone_virtualizer/manifest.jsonl
+  sample_artifact_mode: flac
   segment_seconds: 10.0
   sequence_seconds: 34.0
   stride_seconds: 8.0
   sample_rate: 48000
-  mono_probability: 0.05
-  downmix_probability: 0.05
-  cache_size: 16
+  mono_probability: 0.0
+  downmix_probability: 0.0
+  cache_size: 2
+  materialize_cached_signals: true
   shuffle_segments_within_epoch: true
-  batch_size: 8
-  num_workers: 8
-  prefetch_factor: 4
+  shuffle_segments_within_song: true
+  batch_mode: standard
+  batch_size: 4
+  num_workers: 12
+  prefetch_factor: 2
   pin_memory: true
-  persistent_workers: true
+  persistent_workers: false
   drop_last: true
+  amplitude_lift_enabled: true
+  amplitude_lift_reference: source
+  amplitude_lift_target_rms: 0.33
+  amplitude_lift_scale: 3.0
+  amplitude_lift_eps: 1.0e-8
+  source_resample_augmentation:
+    enabled: true
+    probability: 0.15
+    rates: [44100]
+  source_codec_augmentation:
+    enabled: true
+    probability: 0.20
+    start_step: 50000
+    full_strength_step: 150000
+    backend: auto
+    ffmpeg_path: ffmpeg
+    max_chunk_seconds: 12.0
+    align_max_lag: 8192
+    timeout_seconds: 20.0
+    codecs:
+      mp3:
+        weight: 0.40
+        bitrates: [128, 160, 192, 256, 320]
+      aac:
+        weight: 0.35
+        bitrates: [128, 160, 192, 256]
+      opus:
+        weight: 0.25
+        bitrates: [96, 128, 160, 192]
 
 model:
-  target_channels: 12
+  target_channels: 2
   cond_channels: 2
   patch_size: 1024
-  hidden_dim: 1024
-  num_layers: 12
-  num_heads: 16
+  hidden_dim: 512
+  num_layers: 8
+  num_heads: 8
   mlp_ratio: 4.0
   dropout: 0.0
-  timestep_embed_dim: 1024
+  timestep_embed_dim: 512
   timestep_scale: 1000.0
   max_period: 10000.0
-  num_memory_tokens: 32
-  mix_style_dim: 13
+  num_memory_tokens: 8
+  mix_style_dim: 10
   waveform_level_depth: 2
-  waveform_micro_patch_size: 16
+  waveform_micro_patch_size: 8
   waveform_hidden_dim: 16
-  waveform_num_heads: 16
+  waveform_num_heads: 8
   waveform_mlp_ratio: 2.0
+  activation_checkpointing: false
 
 training:
-  max_steps: 200000
-  grad_accum_steps: 2
-  mixed_precision: bf16
+  max_steps: 400000
+  grad_accum_steps: 4
+  mixed_precision: fp16
   compile_model: true
   compile_mode: max-autotune-no-cudagraphs
   resume_from_checkpoint: null
+  init_from_checkpoint: null
   grad_clip_norm: 1.0
   log_every: 20
-  checkpoint_every: 1000
-  max_checkpoints_to_keep: 5
+  checkpoint_every: 2500
+  max_checkpoints_to_keep: 10
   num_epochs_hint: 1000
   window_seconds: 10.0
   overlap_seconds: 2.0
@@ -66,10 +101,10 @@ training:
   corr_eps: 1.0e-6
   corr_offdiag_only: true
   corr_use_correlation: true
-  downmix_consistency_weight: 1.0
+  downmix_consistency_weight: 0.0
   downmix_consistency_loss: mse
-  downmix_channel_order: [FL, FR, FC, LFE, BL, BR, SL, SR, TFL, TFR, TBL, TBR]
-  mix_style_dropout_probability: 0.10
+  downmix_channel_order: [FL, FR]
+  mix_style_dropout_probability: 0.20
   mrstft_loss_weight: 0.05
   mrstft_fft_sizes: [512, 1024, 2048]
   mrstft_hop_lengths: [128, 256, 512]
@@ -77,17 +112,22 @@ training:
   mrstft_sc_weight: 1.0
   mrstft_log_mag_weight: 1.0
   mrstft_eps: 1.0e-7
-  perceptual_loss_weight: 0.0
+  perceptual_loss_weight: 0.03
   perceptual_n_fft: 1024
   perceptual_hop_length: 256
   perceptual_win_length: 1024
   perceptual_n_mels: 80
   perceptual_f_min: 40.0
   perceptual_f_max: null
-  perceptual_band_weight: 1.0
+  perceptual_band_weight: 1.25
   perceptual_band_low_hz: 150.0
   perceptual_band_high_hz: 8000.0
   perceptual_eps: 1.0e-5
+  binaural_ild_loss_weight: 0.0
+  binaural_ipd_loss_weight: 0.0
+  binaural_ccf_loss_weight: 0.0
+  binaural_loss_warmup_steps: 20000
+  binaural_loss_eps: 1.0e-7
   scheduled_sampling_max_step_offset: 0
   scheduled_sampling_probability: 0.0
   scheduled_sampling_prob_start: null
@@ -115,25 +155,25 @@ training:
   flow_schedule_base_shift: 0.5
   flow_schedule_max_shift: 1.15
   flow_loss_weighting: none
-  use_ema: false
+  use_ema: true
   ema_decay: 0.999
   ema_device: accelerator
   ema_cpu_only: false
   run_validation: false
-  validation_dataset_root: dataset
-  validation_dataset_path: dataset/manifest.jsonl
-  validation_steps: 1000
-  run_validation_generations: false
+  validation_dataset_root: dataset/stereo2spatial_headphone_virtualizer
+  validation_dataset_path: dataset/stereo2spatial_headphone_virtualizer/manifest.jsonl
+  validation_steps: 5000
+  run_validation_generations: true
   num_valid_generations: 1
   validation_generation_seed: 1337
-  validation_generation_input_path: dataset/validation_audio
-  validation_generation_output_path: runs/train/validation_generations
-  validation_generation_solver: heun
-  validation_generation_solver_steps: 64
+  validation_generation_input_path: validation
+  validation_generation_output_path: runs/train_headphone_virtualizer/validation_generations
+  validation_generation_solver: res6s
+  validation_generation_solver_steps: 10
   validation_generation_solver_rtol: 1.0e-5
   validation_generation_solver_atol: 1.0e-5
-  validation_generation_chunk_seconds: null
-  validation_generation_overlap_seconds: 0.5
+  validation_generation_chunk_seconds: 10.0
+  validation_generation_overlap_seconds: 2.0
 
 optimizer:
   type: muon
@@ -149,5 +189,5 @@ optimizer:
 
 scheduler:
   type: cosine
-  warmup_steps: 20000
+  warmup_steps: 40000
   min_lr: 1.0e-5
