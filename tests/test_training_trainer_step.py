@@ -67,6 +67,34 @@ def _build_settings() -> TrainerRuntimeSettings:
             corr_eps=1e-6,
             corr_offdiag_only=True,
             corr_use_correlation=True,
+            downmix_consistency_weight=0.0,
+            downmix_consistency_loss="mse",
+            downmix_channel_order=None,
+            mrstft_loss_weight=0.0,
+            mrstft_fft_sizes=[512, 1024, 2048],
+            mrstft_hop_lengths=[128, 256, 512],
+            mrstft_win_lengths=[512, 1024, 2048],
+            mrstft_sc_weight=1.0,
+            mrstft_log_mag_weight=1.0,
+            mrstft_eps=1e-7,
+            perceptual_loss_weight=0.0,
+            perceptual_sample_rate=48000,
+            perceptual_n_fft=1024,
+            perceptual_hop_length=256,
+            perceptual_win_length=1024,
+            perceptual_n_mels=80,
+            perceptual_f_min=40.0,
+            perceptual_f_max=None,
+            perceptual_band_weight=1.0,
+            perceptual_band_low_hz=150.0,
+            perceptual_band_high_hz=8000.0,
+            perceptual_eps=1e-5,
+            binaural_ild_loss_weight=0.0,
+            binaural_ipd_loss_weight=0.0,
+            binaural_ccf_loss_weight=0.0,
+            binaural_loss_warmup_steps=0,
+            binaural_sample_rate=48000,
+            binaural_loss_eps=1e-7,
         ),
     )
 
@@ -152,3 +180,50 @@ def test_run_training_step_backprops_loss_when_tbptt_disabled(
     assert accelerator.backward_calls == 1
     assert result.loss.requires_grad is True
     assert model.weight.item() == pytest.approx(0.8, abs=1e-6)
+
+
+def test_run_training_step_skips_nonfinite_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _TinyModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    accelerator = _FakeAccelerator()
+
+    def _batch_loss(**_kwargs: Any) -> tuple[torch.Tensor, int, int, None]:
+        return model.weight * torch.tensor(float("nan")), 8, 1, None
+
+    monkeypatch.setattr(
+        trainer_step_module,
+        "_compute_batch_flow_matching_loss",
+        _batch_loss,
+    )
+
+    result = trainer_step_module._run_training_step(
+        accelerator=cast(Any, accelerator),
+        model=model,
+        optimizer=optimizer,
+        discriminator=None,
+        discriminator_optimizer=None,
+        batch={},
+        sequence_plan=SequenceTrainingPlan(
+            sequence_mode="strided_crops",
+            tbptt_windows=0,
+            seq_choices_frames=[8],
+            max_choice_frames=8,
+            window_frames=8,
+            overlap_frames=0,
+            window_metadata=None,
+            detach_memory=True,
+            randomize_per_batch=False,
+        ),
+        global_step=0,
+        seed=0,
+        settings=_build_settings(),
+        grad_clip_norm=1.0,
+        config=cast(Any, _build_config()),
+    )
+
+    assert result.skipped_step is True
+    assert result.skip_reason == "nonfinite_loss"
+    assert accelerator.backward_calls == 0
+    assert model.weight.item() == pytest.approx(1.0)

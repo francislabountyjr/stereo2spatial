@@ -23,6 +23,18 @@ def test_adapt_state_dict_keys_strips_module_prefix() -> None:
     assert set(adapted.keys()) == set(model.state_dict().keys())
 
 
+def test_adapt_state_dict_keys_strips_nested_wrapper_prefixes() -> None:
+    model = _Tiny()
+    prefixed = {
+        f"module._orig_mod.{name}": tensor.clone()
+        for name, tensor in model.state_dict().items()
+    }
+
+    adapted = adapt_state_dict_keys_for_model(model, prefixed)
+
+    assert set(adapted.keys()) == set(model.state_dict().keys())
+
+
 def test_adapt_state_dict_keys_returns_original_when_already_matching() -> None:
     model = _Tiny()
     state = {name: tensor.clone() for name, tensor in model.state_dict().items()}

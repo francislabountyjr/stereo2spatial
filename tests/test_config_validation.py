@@ -24,7 +24,7 @@ def _valid_config() -> TrainConfig:
             segment_seconds=10.0,
             sequence_seconds=10.0,
             stride_seconds=5.0,
-            latent_fps="auto",
+            sample_rate=48_000,
             mono_probability=0.1,
             downmix_probability=0.1,
             cache_size=8,
@@ -38,8 +38,8 @@ def _valid_config() -> TrainConfig:
         ),
         model=ModelConfig(
             target_channels=12,
-            cond_channels=1,
-            latent_dim=128,
+            cond_channels=2,
+            patch_size=128,
             hidden_dim=512,
             num_layers=8,
             num_heads=8,
@@ -104,8 +104,6 @@ def _valid_config() -> TrainConfig:
             validation_generation_seed=1337,
             validation_generation_input_path=None,
             validation_generation_output_path=None,
-            validation_generation_vae_checkpoint_path=None,
-            validation_generation_vae_config_path=None,
         ),
         optimizer=OptimizerConfig(
             type="adamw",
@@ -130,11 +128,98 @@ def test_validate_config_accepts_valid_payload() -> None:
     validate_config(config)
 
 
-def test_validate_config_rejects_invalid_latent_fps_string() -> None:
+def test_validate_config_accepts_song_local_batch_mode() -> None:
     config = _valid_config()
-    config.data.latent_fps = "bad-value"
+    config.data.batch_mode = "song_local"
+    validate_config(config)
 
-    with pytest.raises(ValueError, match="latent_fps"):
+
+def test_validate_config_accepts_flac_artifact_mode() -> None:
+    config = _valid_config()
+    config.data.sample_artifact_mode = "flac"
+    validate_config(config)
+
+
+def test_validate_config_rejects_unknown_batch_mode() -> None:
+    config = _valid_config()
+    config.data.batch_mode = "random_song"
+
+    with pytest.raises(ValueError, match="batch_mode"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_sample_rate() -> None:
+    config = _valid_config()
+    config.data.sample_rate = 0
+
+    with pytest.raises(ValueError, match="sample_rate"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_source_resample_augmentation() -> None:
+    config = _valid_config()
+    config.data.source_resample_aug_enabled = True
+    config.data.source_resample_aug_probability = 0.5
+    config.data.source_resample_aug_rates = []
+
+    with pytest.raises(ValueError, match="source_resample_augmentation.rates"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_source_resample_weight_mismatch() -> None:
+    config = _valid_config()
+    config.data.source_resample_aug_enabled = True
+    config.data.source_resample_aug_probability = 0.5
+    config.data.source_resample_aug_rates = [44_100, 32_000]
+    config.data.source_resample_aug_weights = [1.0]
+
+    with pytest.raises(ValueError, match="source_resample_augmentation.weights"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_source_codec_name() -> None:
+    config = _valid_config()
+    config.data.source_codec_aug_enabled = True
+    config.data.source_codec_aug_probability = 0.2
+    config.data.source_codec_aug_codecs = ["mp2"]
+    config.data.source_codec_aug_codec_weights = [1.0]
+    config.data.source_codec_aug_bitrates = {"mp2": [128]}
+
+    with pytest.raises(ValueError, match="source_codec_augmentation codecs"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_source_codec_backend() -> None:
+    config = _valid_config()
+    config.data.source_codec_aug_backend = "shell"
+
+    with pytest.raises(ValueError, match="source_codec_augmentation.backend"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_waveform_micro_patch_size() -> None:
+    config = _valid_config()
+    config.model.waveform_level_depth = 1
+    config.model.waveform_micro_patch_size = 30
+
+    with pytest.raises(ValueError, match="waveform_micro_patch_size"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_model_num_heads() -> None:
+    config = _valid_config()
+    config.model.num_heads = 7
+
+    with pytest.raises(ValueError, match="model.num_heads"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_waveform_num_heads() -> None:
+    config = _valid_config()
+    config.model.waveform_level_depth = 1
+    config.model.waveform_num_heads = 7
+
+    with pytest.raises(ValueError, match="waveform_num_heads"):
         validate_config(config)
 
 
@@ -149,6 +234,63 @@ def test_validate_config_rejects_invalid_scheduled_sampling_sampler() -> None:
 def test_validate_config_accepts_unipc_scheduled_sampling_sampler() -> None:
     config = _valid_config()
     config.training.scheduled_sampling_sampler = "unipc"
+    validate_config(config)
+
+
+def test_validate_config_accepts_res6s_validation_generation_solver() -> None:
+    config = _valid_config()
+    config.training.validation_steps = 1
+    config.training.run_validation_generations = True
+    config.training.num_valid_generations = 1
+    config.training.validation_generation_input_path = "dataset/validation_audio"
+    config.training.validation_generation_output_path = "runs/test/validation_audio"
+    config.training.validation_generation_solver = "res6s"
+    config.training.validation_generation_solver_steps = 20
+    config.training.validation_generation_chunk_seconds = 12.0
+    config.training.validation_generation_overlap_seconds = 4.0
+    validate_config(config)
+
+
+def test_validate_config_rejects_invalid_validation_generation_solver() -> None:
+    config = _valid_config()
+    config.training.validation_steps = 1
+    config.training.run_validation_generations = True
+    config.training.num_valid_generations = 1
+    config.training.validation_generation_input_path = "dataset/validation_audio"
+    config.training.validation_generation_output_path = "runs/test/validation_audio"
+    config.training.validation_generation_solver = "bad_solver"
+
+    with pytest.raises(ValueError, match="validation_generation_solver"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_target_lift_for_validation_generations() -> None:
+    config = _valid_config()
+    config.data.amplitude_lift_enabled = True
+    config.data.amplitude_lift_reference = "target"
+    config.training.validation_steps = 1
+    config.training.run_validation_generations = True
+    config.training.num_valid_generations = 1
+    config.training.validation_generation_input_path = "dataset/validation_audio"
+    config.training.validation_generation_output_path = "runs/test/validation_audio"
+
+    with pytest.raises(ValueError, match="amplitude_lift_reference"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_amplitude_lift_clip_value() -> None:
+    config = _valid_config()
+    config.data.amplitude_lift_clip_value = 0.0
+
+    with pytest.raises(ValueError, match="amplitude_lift_clip_value"):
+        validate_config(config)
+
+
+def test_validate_config_allows_unclipped_amplitude_lift() -> None:
+    config = _valid_config()
+    config.data.amplitude_lift_enabled = True
+    config.data.amplitude_lift_clip_value = None
+
     validate_config(config)
 
 
@@ -181,6 +323,53 @@ def test_validate_config_rejects_invalid_flow_loss_weighting() -> None:
     config.training.flow_loss_weighting = "snr"
 
     with pytest.raises(ValueError, match="flow_loss_weighting"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_mismatched_mrstft_resolution_lists() -> None:
+    config = _valid_config()
+    config.training.mrstft_loss_weight = 0.05
+    config.training.mrstft_fft_sizes = [256, 512]
+    config.training.mrstft_hop_lengths = [64]
+    config.training.mrstft_win_lengths = [256, 512]
+
+    with pytest.raises(ValueError, match="mrstft_fft_sizes"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_perceptual_fft_window() -> None:
+    config = _valid_config()
+    config.training.perceptual_loss_weight = 0.03
+    config.training.perceptual_n_fft = 256
+    config.training.perceptual_win_length = 512
+
+    with pytest.raises(ValueError, match="perceptual_win_length"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_perceptual_band() -> None:
+    config = _valid_config()
+    config.training.perceptual_loss_weight = 0.03
+    config.training.perceptual_band_low_hz = 8000.0
+    config.training.perceptual_band_high_hz = 150.0
+
+    with pytest.raises(ValueError, match="perceptual_band_high_hz"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_negative_binaural_loss_weight() -> None:
+    config = _valid_config()
+    config.training.binaural_ild_loss_weight = -0.01
+
+    with pytest.raises(ValueError, match="binaural_ild_loss_weight"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_binaural_loss_eps() -> None:
+    config = _valid_config()
+    config.training.binaural_loss_eps = 0.0
+
+    with pytest.raises(ValueError, match="binaural_loss_eps"):
         validate_config(config)
 
 

@@ -13,7 +13,7 @@ from stereo2spatial.training.scheduled_sampling import (
 )
 
 
-class _TimeVelocityModel(torch.nn.Module):
+class _TimeCleanPredictionModel(torch.nn.Module):
     timestep_scale = 11.0
 
     def forward(
@@ -25,10 +25,11 @@ class _TimeVelocityModel(torch.nn.Module):
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:
         del z_cond, valid_mask
-        return t[:, None, None, None].to(dtype=zt.dtype, device=zt.device).expand_as(zt)
+        t4 = t[:, None, None, None].to(dtype=zt.dtype, device=zt.device)
+        return zt + (1.0 - t4) * t4.expand_as(zt)
 
 
-class _StateAwareVelocityModel(torch.nn.Module):
+class _StateAwareCleanPredictionModel(torch.nn.Module):
     timestep_scale = 11.0
 
     def forward(
@@ -40,10 +41,11 @@ class _StateAwareVelocityModel(torch.nn.Module):
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:
         del z_cond, valid_mask
-        return zt + t[:, None, None, None].to(dtype=zt.dtype, device=zt.device)
+        t4 = t[:, None, None, None].to(dtype=zt.dtype, device=zt.device)
+        return zt + (1.0 - t4) * (zt + t4)
 
 
-class _MemoryCarryVelocityModel(torch.nn.Module):
+class _MemoryCarryCleanPredictionModel(torch.nn.Module):
     timestep_scale = 11.0
     num_memory_tokens = 1
 
@@ -70,14 +72,16 @@ class _MemoryCarryVelocityModel(torch.nn.Module):
         mem: torch.Tensor | None = None,
         return_mem: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        del t, z_cond, valid_mask
+        del z_cond, valid_mask
         if mem is None:
             raise RuntimeError("mem is required for memory-carry rollout test model")
+        t4 = t[:, None, None, None].to(dtype=zt.dtype, device=zt.device)
         velocity = mem[:, :, :, None].to(dtype=zt.dtype, device=zt.device).expand_as(zt)
+        clean_prediction = zt + (1.0 - t4) * velocity
         if return_mem:
             self.return_mem_calls += 1
-            return velocity, mem + 1.0
-        return velocity
+            return clean_prediction, mem + 1.0
+        return clean_prediction
 
 
 def test_resolve_scheduled_sampling_probability_ramp() -> None:
@@ -144,7 +148,7 @@ def test_build_rollout_plan_respects_probability_mask() -> None:
 
 
 def test_apply_flow_matching_scheduled_sampling_noop_when_disabled() -> None:
-    model = _TimeVelocityModel()
+    model = _TimeCleanPredictionModel()
     z1 = torch.ones(1, 1, 1, 2, dtype=torch.float32)
     z0 = torch.zeros_like(z1)
     t = torch.tensor([0.7], dtype=torch.float32)
@@ -178,7 +182,7 @@ def test_apply_flow_matching_scheduled_sampling_noop_when_disabled() -> None:
 
 
 def test_apply_flow_matching_scheduled_sampling_supports_heun_solver() -> None:
-    model = _TimeVelocityModel()
+    model = _TimeCleanPredictionModel()
     z1 = torch.ones(1, 1, 1, 1, dtype=torch.float32)
     z0 = torch.zeros_like(z1)
     t = torch.tensor([0.8], dtype=torch.float32)
@@ -237,7 +241,7 @@ def test_apply_flow_matching_scheduled_sampling_supports_heun_solver() -> None:
 
 
 def test_apply_flow_matching_scheduled_sampling_supports_unipc_solver() -> None:
-    model = _StateAwareVelocityModel()
+    model = _StateAwareCleanPredictionModel()
     z1 = torch.ones(1, 1, 1, 1, dtype=torch.float32)
     z0 = torch.zeros_like(z1)
     t = torch.tensor([0.8], dtype=torch.float32)
@@ -314,7 +318,7 @@ def test_apply_flow_matching_scheduled_sampling_supports_unipc_solver() -> None:
 
 
 def test_apply_flow_matching_scheduled_sampling_rollout_uses_plan_target_steps() -> None:
-    model = _TimeVelocityModel()
+    model = _TimeCleanPredictionModel()
     z1 = torch.ones(1, 1, 1, 1, dtype=torch.float32)
     z0 = torch.zeros_like(z1)
     t = torch.tensor([0.83], dtype=torch.float32)
@@ -351,7 +355,7 @@ def test_apply_flow_matching_scheduled_sampling_rollout_uses_plan_target_steps()
 
 
 def test_apply_flow_matching_scheduled_sampling_rollout_threads_memory_state() -> None:
-    model = _MemoryCarryVelocityModel()
+    model = _MemoryCarryCleanPredictionModel()
     z1 = torch.ones(1, 1, 1, 1, dtype=torch.float32)
     z0 = torch.zeros_like(z1)
     t = torch.tensor([0.8], dtype=torch.float32)
@@ -388,7 +392,7 @@ def test_apply_flow_matching_scheduled_sampling_rollout_threads_memory_state() -
 
 
 def test_heun_rollout_memory_should_commit_only_accepted_steps() -> None:
-    model = _MemoryCarryVelocityModel()
+    model = _MemoryCarryCleanPredictionModel()
     z1 = torch.ones(1, 1, 1, 1, dtype=torch.float32)
     z0 = torch.zeros_like(z1)
     t = torch.tensor([0.8], dtype=torch.float32)
@@ -426,7 +430,7 @@ def test_heun_rollout_memory_should_commit_only_accepted_steps() -> None:
 
 
 def test_unipc_rollout_memory_should_commit_only_accepted_steps() -> None:
-    model = _MemoryCarryVelocityModel()
+    model = _MemoryCarryCleanPredictionModel()
     z1 = torch.ones(1, 1, 1, 1, dtype=torch.float32)
     z0 = torch.zeros_like(z1)
     t = torch.tensor([0.8], dtype=torch.float32)
@@ -464,7 +468,7 @@ def test_unipc_rollout_memory_should_commit_only_accepted_steps() -> None:
 
 
 def test_windowed_rollout_commits_memory_once_per_window_endpoint() -> None:
-    model = _MemoryCarryVelocityModel()
+    model = _MemoryCarryCleanPredictionModel()
     z1 = torch.ones(1, 1, 1, 2, dtype=torch.float32)
     z0 = torch.zeros_like(z1)
     t = torch.tensor([0.8], dtype=torch.float32)
@@ -507,7 +511,7 @@ def test_windowed_rollout_commits_memory_once_per_window_endpoint() -> None:
 
 
 def test_reflexflow_auto_enabled_and_populates_prediction_caches() -> None:
-    model = _StateAwareVelocityModel()
+    model = _StateAwareCleanPredictionModel()
     z1 = torch.ones(2, 1, 1, 1, dtype=torch.float32)
     z0 = torch.zeros_like(z1)
     t = torch.tensor([0.8, 0.8], dtype=torch.float32)
@@ -551,7 +555,7 @@ def test_reflexflow_auto_enabled_and_populates_prediction_caches() -> None:
 
 
 def test_reflexflow_can_be_enabled_without_scheduled_sampling_rollout() -> None:
-    model = _TimeVelocityModel()
+    model = _TimeCleanPredictionModel()
     z1 = torch.ones(1, 1, 1, 1, dtype=torch.float32)
     z0 = torch.zeros_like(z1)
     t = torch.tensor([0.7], dtype=torch.float32)

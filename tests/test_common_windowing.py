@@ -10,6 +10,16 @@ def test_segment_starts_covers_tail() -> None:
     assert starts == [0, 3, 6]
 
 
+def test_segment_starts_replaces_near_duplicate_tail_window() -> None:
+    starts = segment_starts(total_frames=1688, window_frames=562, stride_frames=374)
+    assert starts == [0, 374, 748, 1126]
+
+
+def test_segment_starts_appends_tail_when_replacement_would_leave_gap() -> None:
+    starts = segment_starts(total_frames=15, window_frames=4, stride_frames=3)
+    assert starts == [0, 3, 6, 9, 11]
+
+
 def test_segment_starts_single_window() -> None:
     starts = segment_starts(total_frames=3, window_frames=4, stride_frames=1)
     assert starts == [0]

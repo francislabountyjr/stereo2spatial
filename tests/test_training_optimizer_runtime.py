@@ -8,6 +8,8 @@ import torch
 
 from stereo2spatial.training.config import OptimizerConfig, TrainConfig
 from stereo2spatial.training.optimizer import (
+    Muon,
+    build_muon_param_groups,
     build_optimizer,
     build_optimizer_param_groups,
 )
@@ -17,7 +19,12 @@ from stereo2spatial.training.runtime import _apply_lr, _lr_for_step
 class _TinyOptimizerModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
+        self.target_in = torch.nn.Linear(4, 4)
+        self.time_mod = torch.nn.Linear(4, 4)
+        self.semantic_mod = torch.nn.Linear(4, 4)
         self.linear = torch.nn.Linear(4, 4)
+        self.final_proj = torch.nn.Linear(4, 4)
+        self.waveform_out = torch.nn.Linear(4, 4)
         self.norm = torch.nn.LayerNorm(4)
         self.mem_init = torch.nn.Parameter(torch.ones(4, 4))
         self.frozen = torch.nn.Parameter(torch.ones(4, 4), requires_grad=False)
@@ -75,10 +82,54 @@ def test_build_optimizer_param_groups_split_decay_and_no_decay() -> None:
 
     assert id(model.linear.weight) in decay_ids
     assert id(model.linear.bias) in no_decay_ids
+    assert id(model.final_proj.weight) in decay_ids
     assert id(model.norm.weight) in no_decay_ids
     assert id(model.norm.bias) in no_decay_ids
     assert id(model.mem_init) in no_decay_ids
     assert id(model.frozen) not in decay_ids | no_decay_ids
+
+
+def test_build_muon_param_groups_uses_muon_for_matrix_decay_params() -> None:
+    model = _TinyOptimizerModel()
+
+    groups = build_muon_param_groups(model=cast(Any, model), weight_decay=0.1)
+
+    muon_group, adamw_decay_group, adamw_no_decay_group = groups
+    muon_ids = {id(param) for param in muon_group["params"]}
+    adamw_decay_ids = {id(param) for param in adamw_decay_group["params"]}
+    adamw_no_decay_ids = {id(param) for param in adamw_no_decay_group["params"]}
+
+    assert muon_group["use_muon"] is True
+    assert adamw_decay_group["use_muon"] is False
+    assert adamw_no_decay_group["use_muon"] is False
+    assert id(model.linear.weight) in muon_ids
+    assert id(model.target_in.weight) in adamw_decay_ids
+    assert id(model.time_mod.weight) in adamw_decay_ids
+    assert id(model.semantic_mod.weight) in adamw_decay_ids
+    assert id(model.final_proj.weight) in adamw_decay_ids
+    assert id(model.waveform_out.weight) in adamw_decay_ids
+    assert id(model.linear.bias) in adamw_no_decay_ids
+    assert id(model.norm.weight) in adamw_no_decay_ids
+    assert id(model.mem_init) in adamw_no_decay_ids
+    assert id(model.frozen) not in muon_ids | adamw_decay_ids | adamw_no_decay_ids
+
+
+def test_build_optimizer_supports_muon_and_steps_fallback_params() -> None:
+    model = _TinyOptimizerModel()
+    config = _optimizer_config(type="muon", muon_ns_steps=2, muon_nesterov=True)
+    optimizer = build_optimizer(model=cast(Any, model), optimizer_config=config)
+
+    assert isinstance(optimizer, Muon)
+    before_weight = model.linear.weight.detach().clone()
+    before_final_weight = model.final_proj.weight.detach().clone()
+    before_bias = model.linear.bias.detach().clone()
+    loss = model.linear.weight.sum() + model.final_proj.weight.sum() + model.linear.bias.sum()
+    loss.backward()
+    optimizer.step()
+
+    assert not torch.allclose(model.linear.weight, before_weight)
+    assert not torch.allclose(model.final_proj.weight, before_final_weight)
+    assert not torch.allclose(model.linear.bias, before_bias)
 
 
 def test_build_optimizer_rejects_unknown_optimizer_type() -> None:
