@@ -14,6 +14,14 @@ class _TinyModel(torch.nn.Module):
         self.register_buffer("running_stat", torch.ones(1, dtype=torch.float32))
 
 
+class _RuntimeCacheModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(2, 2))
+        self.register_buffer("running_stat", torch.ones(1, dtype=torch.float32))
+        self.register_buffer("_runtime_cache", torch.empty(0), persistent=False)
+
+
 class _OrigModPrefixedStateDictModel(torch.nn.Module):
     def __init__(self, inner: _TinyModel) -> None:
         super().__init__()
@@ -168,3 +176,15 @@ def test_ema_teacher_copy_from_accepts_orig_mod_prefixed_state_dict_keys() -> No
         assert torch.allclose(parameter, torch.full_like(parameter, 5.0))
     for buffer in ema_teacher.model.buffers():
         assert torch.allclose(buffer, torch.full_like(buffer, 5.0))
+
+
+def test_ema_teacher_update_ignores_nonpersistent_runtime_caches() -> None:
+    student = _RuntimeCacheModel()
+    ema_teacher = EMATeacher(model=student, decay=0.5)
+    student._runtime_cache = torch.ones(1024, 1024)
+    student.running_stat.fill_(3.0)
+
+    ema_teacher.update(student)
+
+    assert ema_teacher.model._runtime_cache.numel() == 0
+    assert torch.allclose(ema_teacher.model.running_stat, torch.tensor([3.0]))
