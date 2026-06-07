@@ -3,6 +3,8 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
+import pytest
+import soundfile as sf
 import torch
 
 from stereo2spatial.inference.audio import write_audio_channels_first
@@ -67,6 +69,45 @@ def test_write_audio_channels_first_sets_7_1_4_channel_mask(tmp_path: Path) -> N
     }
 
 
+def test_write_audio_channels_first_sets_5_1_rear_channel_mask(tmp_path: Path) -> None:
+    output_path = tmp_path / "render_5_1_rear.wav"
+    audio = torch.zeros((6, 128), dtype=torch.float32)
+
+    write_audio_channels_first(
+        audio_path=output_path,
+        audio=audio,
+        sample_rate=48_000,
+    )
+
+    fmt_chunk = _read_fmt_chunk(output_path)
+    assert fmt_chunk == {
+        "chunk_size": 40,
+        "format_tag": 0xFFFE,
+        "channels": 6,
+        "sample_rate": 48_000,
+        "block_align": 24,
+        "bits_per_sample": 32,
+        "channel_mask": 0x3F,
+    }
+
+
+def test_write_audio_channels_first_accepts_explicit_5_1_side_order(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "render_5_1_side.wav"
+    audio = torch.zeros((6, 128), dtype=torch.float32)
+
+    write_audio_channels_first(
+        audio_path=output_path,
+        audio=audio,
+        sample_rate=48_000,
+        channel_order=["FL", "FR", "FC", "LFE", "SL", "SR"],
+    )
+
+    fmt_chunk = _read_fmt_chunk(output_path)
+    assert fmt_chunk["channel_mask"] == 0x60F
+
+
 def test_write_audio_channels_first_keeps_standard_wav_for_stereo(
     tmp_path: Path,
 ) -> None:
@@ -88,3 +129,55 @@ def test_write_audio_channels_first_keeps_standard_wav_for_stereo(
         "block_align": 8,
         "bits_per_sample": 32,
     }
+
+
+def test_write_audio_channels_first_keeps_standard_wav_for_explicit_stereo_order(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "render_binaural.wav"
+    audio = torch.zeros((2, 128), dtype=torch.float32)
+
+    write_audio_channels_first(
+        audio_path=output_path,
+        audio=audio,
+        sample_rate=48_000,
+        channel_order=["FL", "FR"],
+    )
+
+    fmt_chunk = _read_fmt_chunk(output_path)
+    assert fmt_chunk["format_tag"] == 0x3
+    assert fmt_chunk["channels"] == 2
+    assert "channel_mask" not in fmt_chunk
+
+
+def test_write_audio_channels_first_writes_stereo_flac_pcm24(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "render_binaural.flac"
+    audio = torch.zeros((2, 128), dtype=torch.float32)
+
+    write_audio_channels_first(
+        audio_path=output_path,
+        audio=audio,
+        sample_rate=48_000,
+    )
+
+    info = sf.info(str(output_path))
+    assert info.format == "FLAC"
+    assert info.subtype == "PCM_24"
+    assert info.channels == 2
+    assert info.samplerate == 48_000
+
+
+def test_write_audio_channels_first_rejects_multichannel_flac_with_mask(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "render_5_1.flac"
+    audio = torch.zeros((6, 128), dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="Use .wav for multichannel"):
+        write_audio_channels_first(
+            audio_path=output_path,
+            audio=audio,
+            sample_rate=48_000,
+        )

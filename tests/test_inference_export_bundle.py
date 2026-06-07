@@ -10,14 +10,10 @@ from safetensors.torch import save_file as save_safetensors_file
 
 from stereo2spatial.cli.infer import (
     _load_runtime_config_and_bundle_payload,
-    _resolve_cli_vae_paths,
     resolve_cli_config_path,
 )
 from stereo2spatial.inference.export_bundle import (
     EXPORT_BUNDLE_CONFIG_FILENAME,
-    EXPORT_BUNDLE_VAE_CONFIG_FILENAME,
-    EXPORT_BUNDLE_VAE_DIRNAME,
-    EXPORT_BUNDLE_VAE_WEIGHTS_FILENAME,
     EXPORT_BUNDLE_WEIGHTS_FILENAME,
     export_model_bundle,
     resolve_inference_config_path,
@@ -43,7 +39,7 @@ def _resolved_config_payload(
             "segment_seconds": 10.0,
             "sequence_seconds": 10.0,
             "stride_seconds": 10.0,
-            "latent_fps": 50,
+            "sample_rate": 48_000,
             "mono_probability": 0.05,
             "downmix_probability": 0.05,
             "cache_size": 16,
@@ -57,8 +53,8 @@ def _resolved_config_payload(
         },
         "model": {
             "target_channels": target_channels,
-            "cond_channels": 1,
-            "latent_dim": 64,
+            "cond_channels": 2,
+            "patch_size": 1024,
             "hidden_dim": 128,
             "num_layers": 2,
             "num_heads": 4,
@@ -68,6 +64,11 @@ def _resolved_config_payload(
             "timestep_scale": 1000.0,
             "max_period": 10000.0,
             "num_memory_tokens": 0,
+            "waveform_level_depth": 2,
+            "waveform_micro_patch_size": 16,
+            "waveform_hidden_dim": 16,
+            "waveform_num_heads": 4,
+            "waveform_mlp_ratio": 2.0,
         },
         "training": {
             "max_steps": 1000,
@@ -123,8 +124,6 @@ def _resolved_config_payload(
             "validation_generation_seed": 1337,
             "validation_generation_input_path": None,
             "validation_generation_output_path": None,
-            "validation_generation_vae_checkpoint_path": None,
-            "validation_generation_vae_config_path": None,
             "use_ema": False,
             "ema_decay": 0.999,
             "ema_device": "accelerator",
@@ -175,24 +174,6 @@ def _write_training_run(
     return run_dir, checkpoint_dir
 
 
-def _write_dummy_vae_assets(tmp_path: Path) -> tuple[Path, Path]:
-    vae_checkpoint_path = tmp_path / "ear_vae_v2_48k.pyt"
-    vae_config_path = tmp_path / "ear_vae_v2.json"
-    torch.save({"state_dict": {"dummy": torch.ones(1)}}, vae_checkpoint_path)
-    vae_config_path.write_text(
-        json.dumps(
-            {
-                "encoder": {"channels": 2},
-                "decoder": {"channels": 2},
-                "transformer": None,
-            },
-            indent=2,
-            ensure_ascii=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    return vae_checkpoint_path, vae_config_path
 
 
 def test_export_model_bundle_prefers_ema_state_when_available(tmp_path: Path) -> None:
@@ -217,7 +198,6 @@ def test_export_model_bundle_prefers_ema_state_when_available(tmp_path: Path) ->
         student_state=student_state,
         ema_state=ema_state,
     )
-    vae_checkpoint_path, vae_config_path = _write_dummy_vae_assets(tmp_path)
 
     output_dir = tmp_path / "bundle"
     export_model_bundle(
@@ -226,8 +206,6 @@ def test_export_model_bundle_prefers_ema_state_when_available(tmp_path: Path) ->
         output_dir=output_dir,
         channel_layout_name="stereo",
         channel_order=["FL", "FR"],
-        vae_checkpoint_path=vae_checkpoint_path,
-        vae_config_path=vae_config_path,
     )
 
     exported_state = load_safetensors_file(
@@ -238,7 +216,7 @@ def test_export_model_bundle_prefers_ema_state_when_available(tmp_path: Path) ->
     assert torch.allclose(exported_state["linear.bias"], ema_model.linear.bias)
 
 
-def test_cli_bundle_helpers_resolve_config_and_bundled_vae(tmp_path: Path) -> None:
+def test_cli_bundle_helpers_resolve_config(tmp_path: Path) -> None:
     run_dir, checkpoint_dir = _write_training_run(
         tmp_path,
         target_channels=2,
@@ -247,7 +225,6 @@ def test_cli_bundle_helpers_resolve_config_and_bundled_vae(tmp_path: Path) -> No
             "_orig_mod.linear.bias": torch.zeros((3,)),
         },
     )
-    vae_checkpoint_path, vae_config_path = _write_dummy_vae_assets(tmp_path)
     bundle_dir = tmp_path / "bundle"
     export_model_bundle(
         train_run_dir=run_dir,
@@ -255,8 +232,6 @@ def test_cli_bundle_helpers_resolve_config_and_bundled_vae(tmp_path: Path) -> No
         output_dir=bundle_dir,
         channel_layout_name="stereo",
         channel_order=["FL", "FR"],
-        vae_checkpoint_path=vae_checkpoint_path,
-        vae_config_path=vae_config_path,
     )
 
     assert resolve_inference_config_path(bundle_dir) == (
@@ -275,19 +250,45 @@ def test_cli_bundle_helpers_resolve_config_and_bundled_vae(tmp_path: Path) -> No
     config, bundle_payload = _load_runtime_config_and_bundle_payload(resolved_cli_path)
     assert bundle_payload is not None
     assert config.model.target_channels == 2
+    assert config.model.waveform_level_depth == 2
+    assert config.model.waveform_micro_patch_size == 16
+    assert config.model.waveform_hidden_dim == 16
+    assert config.model.waveform_num_heads == 4
 
-    resolved_vae_checkpoint, resolved_vae_config = _resolve_cli_vae_paths(
-        checkpoint=str(bundle_dir),
-        resolved_config_path=resolved_cli_path,
-        vae_checkpoint_path=None,
-        vae_config_path=None,
+
+def test_export_model_bundle_resolves_5_1_rear_layout_metadata(tmp_path: Path) -> None:
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=6,
+        student_state={
+            "_orig_mod.linear.weight": torch.zeros((3, 4)),
+            "_orig_mod.linear.bias": torch.zeros((3,)),
+        },
     )
-    assert resolved_vae_checkpoint == (
-        bundle_dir / EXPORT_BUNDLE_VAE_DIRNAME / EXPORT_BUNDLE_VAE_WEIGHTS_FILENAME
+    output_dir = tmp_path / "bundle_5_1"
+
+    export_model_bundle(
+        train_run_dir=run_dir,
+        checkpoint="latest",
+        output_dir=output_dir,
+        channel_layout_name="5.1 rear",
     )
-    assert resolved_vae_config == (
-        bundle_dir / EXPORT_BUNDLE_VAE_DIRNAME / EXPORT_BUNDLE_VAE_CONFIG_FILENAME
+
+    payload = json.loads((output_dir / EXPORT_BUNDLE_CONFIG_FILENAME).read_text())
+    assert payload["channel_order"] == ["FL", "FR", "FC", "LFE", "BL", "BR"]
+    assert payload["channel_mask"] == 0x3F
+
+    config, _ = _load_runtime_config_and_bundle_payload(
+        output_dir / EXPORT_BUNDLE_CONFIG_FILENAME
     )
+    assert config.training.downmix_channel_order == [
+        "FL",
+        "FR",
+        "FC",
+        "LFE",
+        "BL",
+        "BR",
+    ]
 
 
 def test_export_model_bundle_validates_channel_order_length(tmp_path: Path) -> None:
@@ -299,7 +300,6 @@ def test_export_model_bundle_validates_channel_order_length(tmp_path: Path) -> N
             "_orig_mod.linear.bias": torch.zeros((3,)),
         },
     )
-    vae_checkpoint_path, vae_config_path = _write_dummy_vae_assets(tmp_path)
 
     with pytest.raises(ValueError, match="channel_order length"):
         export_model_bundle(
@@ -308,6 +308,4 @@ def test_export_model_bundle_validates_channel_order_length(tmp_path: Path) -> N
             output_dir=tmp_path / "bundle",
             channel_layout_name="stereo",
             channel_order=["FL", "FR", "FC"],
-            vae_checkpoint_path=vae_checkpoint_path,
-            vae_config_path=vae_config_path,
         )
