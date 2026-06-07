@@ -1,305 +1,130 @@
 # stereo2spatial
 
-<p align="center">
-  <img src="./assets/Wide310x150Logo.scale-200.png" alt="Stereo2Spatial logo" width="420" />
-</p>
+`stereo2spatial` trains and runs a conditional diffusion/flow model that maps
+mono or stereo music into spatial multichannel audio, with the default target
+layout set to `7.1.4`.
 
-<p align="center">
-  <a href="https://get.microsoft.com/installer/download/9PJ6R7RQDVP1?referrer=appbadge&cid=model-github-readme" target="_self">
-    <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200" alt="Download from Microsoft" />
-  </a>
-</p>
+The current stack models raw waveform patches directly. Dataset artifacts store
+continuous waveform tensors in `[channels, samples]` layout, and the training
+dataset groups them into patches at load time according to `model.patch_size`.
+Inference writes rendered multichannel WAVs without an intermediate
+representation.
 
-<p align="center">
-  <a href="https://stereo2spatial.francislabounty.com/">App Homepage</a> | <a href="https://francislabounty.com/blog/stereo2spatial">Case Study</a>
-</p>
+## What Is Included
 
-[![CI](https://github.com/francislabountyjr/stereo2spatial/actions/workflows/ci.yml/badge.svg)](https://github.com/francislabountyjr/stereo2spatial/actions/workflows/ci.yml)
+- `SpatialDiT`: the conditional waveform-patch generator
+- raw waveform dataset loading with `bundle` and `split` artifact modes
+- clean endpoint prediction under flow matching
+- multi-resolution STFT waveform losses
+- optional scheduled sampling, EMA, GAN, correlation, routing, and downmix
+  consistency losses
+- waveform validation generation and local inference
+- scripts for Atmos rendering, dataset preprocessing, QC, deletion, and bundle
+  export
 
-`stereo2spatial` is a training and inference stack for turning mono or stereo
-audio into spatial multichannel audio in an EAR-VAE latent space.
+## Dataset Format
 
-The repo includes:
+Each sample directory contains either:
 
-- a SpatialDiT-based latent model
-- an inference CLI for local checkpoints and exported bundles
-- stage 1 / stage 2 training presets
-- dataset prep, QC, and export scripts
-- bundle export utilities for easy local deployment or Hugging Face release
+- `sample_bundle.pt` with `target_signal`, `source_stereo_signal`,
+  `source_mono_signal`, and `source_downmix_signal`
+- or split files:
+  - `target_signal.pt`
+  - `source_stereo_signal.pt`
+  - `source_mono_signal.pt`
+  - `source_downmix_signal.pt`
 
-## Start Here
+Every stored tensor is normalized to `[C, S]`:
 
-- If you just want to run the pretrained model, jump to
-  [Inference With stereo2spatial-v1](#inference-with-stereo2spatial-v1).
-- If you want to train or fine-tune, jump to
-  [Training Your Own Model](#training-your-own-model).
-- If you want to understand the config knobs, see
-  [Understanding The Training Config](#understanding-the-training-config)
-  and [configs/README.md](configs/README.md).
+- `C`: channel count
+- `S`: waveform samples
 
-## Install
+The training loader reshapes those continuous waveforms to `[C, P, T]`, where
+`P` is `model.patch_size` and `T` is the resulting patch index over time. This
+keeps patch size as a training/model hyperparameter instead of baking it into
+the dataset.
 
-This repo targets Python 3.10.
+`source_mono_signal` is duplicated to stereo channel width by preprocessing so
+all default conditioning choices match `model.cond_channels: 2`. `metadata.json`
+stores sample rate, original sample count, channel layout, source path, patch
+size, tensor shapes, and QC metadata. `manifest.jsonl` indexes the sample
+directories for training.
 
-```bash
-python -m venv .venv
-. .venv/Scripts/activate  # Windows PowerShell: .\.venv\Scripts\Activate.ps1
-pip install -e .
-```
+## Preprocess Data
 
-If you also want lint, type-check, and test tooling:
-
-```bash
-pip install -e .[dev]
-```
-
-## EAR-VAE
-
-`stereo2spatial` uses EAR-VAE as the latent audio codec layer for training,
-validation generation, bundle export, and inference.
-
-EAR-VAE links:
-
-- Hugging Face: <https://huggingface.co/earlab/EAR_VAE>
-- GitHub: <https://github.com/Eps-Acoustic-Revolution-Lab/EAR_VAE>
-
-When you use an exported bundle such as `stereo2spatial-v1`, the required
-EAR-VAE assets can be bundled alongside the model. When you run directly from a
-training checkpoint or enable decoded validation generations during training,
-you should provide EAR-VAE checkpoint/config paths explicitly.
-
-## Inference With stereo2spatial-v1
-
-Pretrained v1 bundle:
-
-- Hugging Face model: <https://huggingface.co/francislabounty/stereo2spatial-v1>
-
-### 1. Download the bundle
-
-The simplest path is downloading the full exported bundle into one directory.
+Run from the repository root:
 
 ```bash
-python -m pip install -U "huggingface_hub[cli]"
-hf download francislabounty/stereo2spatial-v1 --local-dir checkpoints/stereo2spatial-v1
+python scripts/data/preprocess_dataset.py --dataset-root dataset/stereo2spatial_dataset --input-root path/to/atmos_sources --sample-artifact-mode bundle
 ```
 
-Expected layout:
+The preprocessing script renders the spatial target and stereo source, derives
+mono and AC3-style stereo-downmix conditioning audio, and writes the continuous
+waveform artifacts plus `manifest.jsonl`.
 
-```text
-checkpoints/stereo2spatial-v1/
-  config.json
-  model.safetensors
-  vae/
-    ear_vae_v2.json
-    ear_vae_v2_48k.pyt
-```
-
-If you prefer a browser download, keep the same folder layout intact so the CLI
-can auto-resolve the config and bundled VAE files.
-
-### 2. Run inference
-
-Point `--checkpoint` at the exported bundle directory:
+For QC inspection of one processed sample:
 
 ```bash
-python infer.py --checkpoint checkpoints/stereo2spatial-v1 --input-audio path/to/input.wav --output-audio path/to/output_spatial.wav --device cuda --show-progress
+python scripts/data/decode_sample_for_qc.py --dataset-root dataset/stereo2spatial_dataset --stream-hash <hash>
 ```
 
-What this does:
+This writes the stored waveform tensors back to WAV files for listening checks.
 
-- reads bundle metadata from `config.json`
-- loads model weights from `model.safetensors`
-- auto-discovers bundled EAR-VAE files under `vae/`
-- writes a multichannel WAV to `--output-audio`
+## Train
 
-Useful inference flags:
-
-- `--report-json path/to/report.json`: write a machine-readable run summary
-- `--solver auto|heun|euler|unipc|...`: change latent ODE solver
-- `--device cpu`: run on CPU when CUDA is unavailable, at much slower speed
-- `--normalize-peak`: normalize output peak before writing WAV
-
-## Inference From Your Own Checkpoints
-
-There are two supported workflows.
-
-### 1. Preferred: export an inference bundle
-
-This is the cleanest path for local deployment and distribution:
-
-```bash
-python scripts/export/export_model_bundle.py --train-run-dir runs/train_with_gan --checkpoint latest --output-dir exports/stereo2spatial-v1
-python infer.py --checkpoint exports/stereo2spatial-v1 --input-audio path/to/input.wav --output-audio path/to/output_spatial.wav --device cuda
-```
-
-If you include VAE assets in the bundle, no extra VAE CLI arguments are needed.
-
-### 2. Directly from a training checkpoint
-
-Use this when you want to infer from a run directory before exporting:
-
-```bash
-python infer.py --config configs/train_with_gan.yaml --checkpoint runs/train_with_gan/checkpoints/step_0200000 --vae-checkpoint-path path/to/ear_vae_v2_48k.pyt --vae-config-path path/to/ear_vae_v2.json --input-audio path/to/input.wav --output-audio path/to/output_spatial.wav --device cuda
-```
-
-Use `--checkpoint latest` to pick the newest checkpoint under
-`<output_dir>/checkpoints/`.
-
-## Training Your Own Model
-
-### Training prerequisites
-
-The training stack operates on precomputed latent datasets, not raw WAVs
-directly. In practice that means you need:
-
-- a dataset root such as `dataset/`
-- a `manifest.jsonl` describing sample directories
-- latent artifacts written in `bundle` or `split` mode
-- config files that point `data.dataset_root` and `data.manifest_path` at that
-  dataset
-
-Utilities for building and inspecting these latent datasets live under
-`scripts/data/`.
-
-You only need EAR-VAE checkpoint/config paths during training if you enable
-validation generations or when you export an inference bundle.
-
-### Choose a preset
-
-- `configs/train.yaml`: stage 1 baseline, no GAN, strided crop training
-- `configs/train_with_gan.yaml`: stage 1 with adversarial loss enabled
-- `configs/train_stage_2.yaml`: stage 2 longer-context / full-song training,
-  EMA enabled, scheduled sampling enabled
-- `configs/train_with_gan_stage_2.yaml`: stage 2 longer-context training with
-  GAN enabled
-
-### Start training
+Start with one of the configs in `configs/`:
 
 ```bash
 python train.py --config configs/train.yaml
 ```
 
-Common variants:
+For replicated-model multi-GPU training, launch the same training module through
+Accelerate. Each GPU gets its own model copy and gradients are synchronized:
 
 ```bash
-python train.py --config configs/train_with_gan.yaml
-python train.py --config configs/train_stage_2.yaml
-python train.py --config configs/train_with_gan_stage_2.yaml
+python -m accelerate.commands.launch --multi_gpu --num_processes 2 --gpu_ids 0,1 -m stereo2spatial.cli.train --config configs/train_headphone_virtualizer.yaml
 ```
 
-Checkpoint controls:
+Use `--num_processes` and `--gpu_ids` to match the GPUs you want to train on.
+This is data parallelism, not model parallelism.
+
+The default config expects:
+
+- `data.sample_rate: 48000`
+- `model.patch_size: 1024`
+- `model.cond_channels: 2`
+- `model.target_channels: 12`
+
+Training batches expose:
+
+- `target_signal`: spatial target patches
+- `cond_signal`: stereo, mono, or downmix conditioning patches
+- `valid_mask`: valid non-padding patch frames
+
+## Inference
+
+Export a checkpoint bundle:
 
 ```bash
-python train.py --config configs/train.yaml --resume-from latest
-python train.py --config configs/train_with_gan.yaml --init-from runs/train/checkpoints/step_0200000
+python scripts/export/export_model_bundle.py --train-run-dir runs/train --checkpoint latest --output-dir exports/stereo2spatial-waveform
 ```
 
-Training outputs land under `output_dir`, typically including:
-
-- `resolved_config.json`
-- `checkpoints/step_XXXXXXX/`
-- validation artifacts when enabled
-
-## Understanding The Training Config
-
-Top-level config sections:
-
-- `seed`: run seed
-- `output_dir`: where checkpoints, resolved config, and validation artifacts go
-- `data`: dataset paths, latent timing, augmentation probabilities, dataloader
-  settings
-- `model`: SpatialDiT architecture and memory-token settings
-- `training`: sequence regime, logging, checkpoint cadence, GAN, EMA,
-  scheduled sampling, flow schedule, and validation controls
-- `optimizer`: optimizer family and hyperparameters
-- `scheduler`: learning-rate schedule
-
-High-impact settings to understand before changing presets:
-
-- `data.sample_artifact_mode`: `bundle` or `split`; controls how per-sample
-  latent artifacts are loaded from disk
-- `data.mono_probability` / `data.downmix_probability`: conditioning
-  augmentation probabilities
-- `model.target_channels`: output channel count in latent space
-- `model.num_memory_tokens`: recurrent memory-token count for longer-context
-  modeling
-- `training.sequence_mode`: `strided_crops` for shorter randomized chunks, or
-  `full_song` for long-context / full-sequence training
-- `training.sequence_seconds_choices`: sequence-length curriculum for crop-based
-  training
-- `training.window_seconds` / `training.overlap_seconds`: chunking used inside
-  longer sequence processing
-- `training.use_gan` and `training.gan_*`: discriminator settings and
-  adversarial loss weights
-- `training.scheduled_sampling_*`: rollout length, probability, strategy, and
-  sampler for stage 2 scheduled sampling
-- `training.flow_*`: timestep sampling and flow schedule shaping options
-- `training.use_ema` and `training.ema_*`: whether EMA teacher weights are
-  maintained and where they live
-- `training.run_validation*`: latent validation and optional decoded generation
-  preview controls
-- `optimizer.type`: `adamw` or `adam`
-- `scheduler.type`: `cosine` or `constant`
-
-For a preset-by-preset breakdown and more field-level guidance, see
-[configs/README.md](configs/README.md).
-
-## Exporting Bundles For Inference
-
-Exporting a run into a self-contained bundle is the recommended handoff format
-for local inference and Hugging Face uploads.
+Run inference from the bundle:
 
 ```bash
-python scripts/export/export_model_bundle.py --train-run-dir runs/train_stage_2 --checkpoint latest --output-dir exports/stereo2spatial-stage2 --weights-source auto
+python infer.py --checkpoint exports/stereo2spatial-waveform --input-audio path\to\input.wav --output-audio path\to\output_7_1_4.wav --device cuda
 ```
 
-The exported bundle contains:
-
-- `config.json`
-- `model.safetensors`
-- bundled EAR-VAE assets under `vae/` when available
+Inference reads mono or stereo audio, patchifies it, samples spatial waveform
+patches, unpatches them, and writes a multichannel WAV.
 
 ## Repository Layout
 
-- `stereo2spatial/`: library code
-- `stereo2spatial/cli/`: train/infer CLI entrypoints
-- `stereo2spatial/modeling/`: shared model definitions
-- `stereo2spatial/training/`: training stack, losses, dataset logic, and config
-  parsing
-- `stereo2spatial/inference/`: inference runner, checkpoint loading, audio I/O,
-  and bundle handling
-- `stereo2spatial/codecs/ear_vae/`: EAR-VAE integration API
-- `stereo2spatial/vendor/ear_vae/`: vendored EAR-VAE model code
+- `stereo2spatial/modeling/`: SpatialDiT model and layers
+- `stereo2spatial/training/`: config loading, dataset, losses, validation, loop
+- `stereo2spatial/inference/`: checkpoint loading, sampling, audio I/O, runner
+- `scripts/data/`: dataset preprocessing and maintenance utilities
+- `scripts/atmos/`: Atmos rendering/conversion helpers
+- `scripts/export/`: inference bundle export
 - `configs/`: runnable training presets
-- `scripts/`: dataset prep, QC, Atmos tooling, and bundle export helpers
-- `tests/`: unit tests covering config, inference, and training helpers
-
-## Future Work
-
-Promising next directions for the project include:
-
-- fine-tuning `EAR-VAE` for independent per-channel `7.1.4` spatial decoding.
-  The current VAE was trained around stereo encode/decode behavior rather than
-  decoding each spatial channel independently, so adaptation here may improve
-  decoded quality and better align output distributions.
-- scaling model capacity and training budget. That likely means a larger
-  backbone, more training steps, and potentially a larger dataset.
-- experimenting with explicit conditioning for mix style so the model can
-  better follow different spatial presentation preferences at inference time.
-- adding distributed training support across multiple GPUs and, eventually,
-  multiple nodes for larger-scale experiments.
-
-## Related Docs
-
-- [docs/architecture.md](docs/architecture.md): architecture deep dive and
-  system diagrams
-- [configs/README.md](configs/README.md): config presets and tuning guide
-- [scripts/README.md](scripts/README.md): dataset, QC, Atmos, and export scripts
-
-## Acknowledgments
-
-Thanks to the EAR Lab team for open-sourcing EAR-VAE and making the latent
-audio codec stack available to the community.
-
-- EAR-VAE on Hugging Face: <https://huggingface.co/earlab/EAR_VAE>
-- EAR-VAE on GitHub: <https://github.com/Eps-Acoustic-Revolution-Lab/EAR_VAE>
+- `tests/`: unit and smoke coverage

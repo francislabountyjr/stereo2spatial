@@ -11,12 +11,15 @@ starting point for new experiments instead of building configs from scratch.
 | `train_with_gan.yaml` | You want stage 1 with adversarial refinement | Stage 1 regime plus discriminator and auxiliary losses |
 | `train_stage_2.yaml` | You want longer-context stage 2 refinement | `full_song` training, batch size 1, EMA enabled, scheduled sampling enabled |
 | `train_with_gan_stage_2.yaml` | You want stage 2 plus adversarial refinement | Stage 2 long-context regime with GAN enabled |
+| `test_5_1_rear.yaml` | You want a 2080 Ti friendly 5.1 rear smoke run | 6-channel rear layout, smaller DiT, no compile |
+| `test_headphone_virtualizer.yaml` | You want direct binaural stereo smoke training | 2-channel headphone target, smaller DiT, no downmix loss |
+| `train_headphone_virtualizer.yaml` | You want direct binaural stereo training | 2-channel headphone target, EMA, waveform micro-patch refinement, song-local FLAC loading |
 
 In practice:
 
 - stage 1 configs are the right place to start from scratch
 - stage 2 configs are refinement configs for longer-context behavior
-- GAN presets trade extra complexity and memory use for sharper decoded results
+- GAN presets trade extra complexity and memory use for sharper waveform detail
 
 ## Top-Level Sections
 
@@ -24,7 +27,7 @@ Every training config resolves into these top-level sections:
 
 - `seed`: reproducibility seed
 - `output_dir`: run directory for checkpoints and resolved config
-- `data`: dataset paths, latent timing, augmentation, and dataloader settings
+- `data`: dataset paths, waveform timing, augmentation, and dataloader settings
 - `model`: SpatialDiT architecture
 - `training`: training loop behavior, sequence regime, GAN, EMA, scheduled
   sampling, flow schedule, and validation
@@ -37,34 +40,64 @@ Every training config resolves into these top-level sections:
 
 Important fields:
 
-- `dataset_root`: root folder for latent samples
-- `manifest_path`: JSONL manifest describing sample directories
+- `datasets`: optional list of `{dataset_root, manifest_path}` pairs for
+  training from multiple drives/directories
+- `dataset_root`: root folder for continuous waveform samples when using one
+  dataset, or a list when paired with a `manifest_path` list
+- `manifest_path`: JSONL manifest describing sample directories when using one
+  dataset, or a list when paired with a `dataset_root` list
 - `sample_artifact_mode`: `bundle` or `split`
 - `segment_seconds`: base segment length written by preprocessing
 - `sequence_seconds`: nominal loaded sequence length
 - `stride_seconds`: stride used when walking long songs
-- `latent_fps`: latent frame rate, either numeric or `auto`
+- `sample_rate`: waveform sample rate
 - `mono_probability` / `downmix_probability`: conditioning augmentation
 - `batch_size`, `num_workers`, `prefetch_factor`, `pin_memory`,
   `persistent_workers`: dataloader throughput controls
+- `source_resample_augmentation`: optional source-only sample-rate roundtrip
+- `source_codec_augmentation`: optional source-only MP3/AAC/Opus encode-decode
+  roundtrip with step-ramped probability. It is intended for normal consumer
+  delivery-format robustness, not clipping/noise/stereo-damage augmentation.
 
 Rules worth remembering:
 
 - `mono_probability + downmix_probability` must stay `<= 1`
 - `sample_artifact_mode` must be `bundle` or `split`
+- if multiple datasets are configured, roots and manifests are paired by list
+  order and loaded into one unified segment schedule
+- `5.1 rear` uses channel order `FL, FR, FC, LFE, BL, BR` and WAVEX speaker
+  mask `0x3f`; `5.1 side` remains available as `FL, FR, FC, LFE, SL, SR`
+- `Headphone Virtualizer` is treated as a binaural stereo target. It keeps
+  ordinary 2-channel WAV output, disables downmix consistency in the provided
+  smoke config, and uses stereo-derived mix-style surrogate features.
+- Layout-inactive mix-style controls are omitted from normalized training
+  vectors. `5.1 rear` uses 11 controls; `Headphone Virtualizer` uses 10.
 
 ### `model`
 
 Important fields:
 
 - `target_channels`: spatial output channel count
-- `cond_channels`: conditioning channel count; current stack expects `1`
-- `latent_dim`: latent feature depth
+- `cond_channels`: conditioning channel count; current stack expects `2`
+- `patch_size`: waveform samples per transformer patch
 - `hidden_dim`, `num_layers`, `num_heads`, `mlp_ratio`, `dropout`: transformer
   size controls
 - `timestep_embed_dim`, `timestep_scale`, `max_period`: timestep embedding
   behavior
 - `num_memory_tokens`: recurrent memory-token count
+- `mix_style_dim`: number of normalized mix-style conditioning controls
+- `waveform_level_depth`: number of PixelDiT-style waveform-token refinement
+  blocks. `0` disables the fine pathway for ablation.
+- `waveform_micro_patch_size`: raw samples per waveform microtoken inside each
+  coarse patch. This must divide `patch_size`.
+- `waveform_hidden_dim`: hidden width of each waveform microtoken. The presets
+  use a compact width because the microtoken sequence is dense.
+- `waveform_num_heads`: temporal attention heads used after waveform token
+  compaction. Null falls back to `num_heads`.
+- `waveform_mlp_ratio`: MLP expansion ratio inside waveform-token blocks.
+- `activation_checkpointing`: recompute coarse and waveform transformer block
+  activations during backward to reduce VRAM use. This trades extra compute for
+  memory headroom and is most useful for larger models or long windows.
 
 Change `target_channels` and exported `channel_order` together if you are
 targeting a different layout.
@@ -116,6 +149,25 @@ Aux losses:
 
 - `routing_kl_weight`, `routing_kl_temperature`, `routing_kl_eps`
 - `corr_weight`, `corr_eps`, `corr_offdiag_only`, `corr_use_correlation`
+- `downmix_consistency_weight`, `downmix_consistency_loss`,
+  `downmix_channel_order`
+- `mix_style_dropout_probability`: probability of withholding per-song mix-style
+  controls during training
+- `mrstft_loss_weight`, `mrstft_fft_sizes`, `mrstft_hop_lengths`,
+  `mrstft_win_lengths`, `mrstft_sc_weight`, `mrstft_log_mag_weight`
+- `perceptual_loss_weight`, `perceptual_n_fft`, `perceptual_hop_length`,
+  `perceptual_win_length`, `perceptual_n_mels`, `perceptual_f_min`,
+  `perceptual_f_max`, `perceptual_band_weight`,
+  `perceptual_band_low_hz`, `perceptual_band_high_hz`, `perceptual_eps`.
+  This is a broad stereo/render-path log-mel loss. It compares direct 2.0
+  targets as stereo, or spatial targets after configured stereo downmix; it
+  does not add a center/mid-channel vocal constraint.
+- `binaural_ild_loss_weight`, `binaural_ipd_loss_weight`,
+  `binaural_ccf_loss_weight`, `binaural_loss_warmup_steps`,
+  `binaural_loss_eps`: optional direct-headphone cue losses for two-channel
+  targets. ILD compares left/right level ratios, IPD compares interaural phase
+  in STFT space, and CCF compares short-window left/right correlation profiles.
+  They are ignored for non-2-channel targets.
 
 Scheduled sampling:
 
@@ -160,18 +212,25 @@ Validation controls:
 - `validation_generation_seed`
 - `validation_generation_input_path`
 - `validation_generation_output_path`
-- `validation_generation_vae_checkpoint_path`
-- `validation_generation_vae_config_path`
+- `validation_generation_solver`: inference solver for generated previews
+  (`heun`, `euler`, `unipc`, `res6s`, `res_6s`, `dopri5`, `midpoint`, `rk4`,
+  `explicit_adams`, `implicit_adams`, or `auto`)
+- `validation_generation_solver_steps`
+- `validation_generation_solver_rtol` / `validation_generation_solver_atol`
+- `validation_generation_chunk_seconds`: null uses `data.segment_seconds`
+- `validation_generation_overlap_seconds`
 
 ### `optimizer`
 
-- `type`: `adamw` or `adam`
+- `type`: `muon`, `adamw`, or `adam`
 - `lr`
 - `weight_decay`
 - `beta1`, `beta2`
 - `eps`
 - `adamw_fused`
 - `adamw_foreach`
+- `muon_ns_steps`
+- `muon_nesterov`
 
 ### `scheduler`
 
@@ -195,6 +254,7 @@ Usually adjust these first:
 
 - lower `data.batch_size`
 - increase `training.grad_accum_steps`
+- enable `model.activation_checkpointing`
 - reduce `model.hidden_dim`, `model.num_layers`, or `model.num_heads`
 - disable GAN if you do not need adversarial training
 - disable `compile_model` if compile startup cost is not worth it
@@ -209,17 +269,16 @@ Move from a stage 1 preset toward a stage 2 preset:
 - keep `training.require_batch_size_one_for_full_song: true`
 - consider enabling EMA and scheduled sampling
 
-### Turn on decoded validation previews
+### Turn on validation audio previews
 
 Set:
 
 - `training.run_validation_generations: true`
 - `training.validation_generation_input_path`
 - `training.validation_generation_output_path`
-- `training.validation_generation_vae_checkpoint_path`
-- `training.validation_generation_vae_config_path`
 
-Without the VAE paths, decoded validation previews will fail validation checks.
+Validation generation now runs the current waveform-patch model directly and
+writes rendered multichannel WAVs.
 
 ### Export for local inference or Hugging Face
 
