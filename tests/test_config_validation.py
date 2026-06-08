@@ -337,6 +337,24 @@ def test_validate_config_rejects_mismatched_mrstft_resolution_lists() -> None:
         validate_config(config)
 
 
+def test_validate_config_rejects_all_zero_waveform_reconstruction_weights() -> None:
+    config = _valid_config()
+    config.training.waveform_mse_loss_weight = 0.0
+    config.training.waveform_l1_loss_weight = 0.0
+    config.training.waveform_charbonnier_loss_weight = 0.0
+
+    with pytest.raises(ValueError, match="waveform reconstruction"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_waveform_charbonnier_eps() -> None:
+    config = _valid_config()
+    config.training.waveform_charbonnier_eps = 0.0
+
+    with pytest.raises(ValueError, match="waveform_charbonnier_eps"):
+        validate_config(config)
+
+
 def test_validate_config_rejects_invalid_perceptual_fft_window() -> None:
     config = _valid_config()
     config.training.perceptual_loss_weight = 0.03
@@ -370,6 +388,22 @@ def test_validate_config_rejects_invalid_binaural_loss_eps() -> None:
     config.training.binaural_loss_eps = 0.0
 
     with pytest.raises(ValueError, match="binaural_loss_eps"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_binaural_mid_side_loss_type() -> None:
+    config = _valid_config()
+    config.training.binaural_mid_side_loss_type = "huber"
+
+    with pytest.raises(ValueError, match="binaural_mid_side_loss_type"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_binaural_frame_ild_size() -> None:
+    config = _valid_config()
+    config.training.binaural_frame_ild_frame_size = 0
+
+    with pytest.raises(ValueError, match="binaural_frame_ild_frame_size"):
         validate_config(config)
 
 

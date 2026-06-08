@@ -233,6 +233,35 @@ def test_compute_flow_matching_window_loss_applies_sample_weights() -> None:
     assert weighted.item() == pytest.approx(1.5, abs=1e-7)
 
 
+def test_compute_flow_matching_window_loss_supports_l1_and_charbonnier() -> None:
+    prediction = torch.tensor([[[[2.0, 0.0]]]], dtype=torch.float32)
+    target_clean = torch.zeros_like(prediction)
+    valid_mask = torch.ones(1, 2, dtype=torch.bool)
+    frame_weight = torch.ones(2, dtype=torch.float32)
+
+    loss = compute_flow_matching_window_loss(
+        prediction=prediction,
+        target_clean=target_clean,
+        valid_mask=valid_mask,
+        frame_weight=frame_weight,
+        waveform_mse_loss_weight=0.0,
+        waveform_l1_loss_weight=1.0,
+        waveform_charbonnier_loss_weight=1.0,
+        waveform_charbonnier_eps=1e-3,
+        reflex_enabled=False,
+    )
+
+    expected_l1 = 1.0
+    expected_charbonnier = (
+        (torch.sqrt(torch.tensor(4.0 + 1e-6)) - 1e-3)
+        + (torch.sqrt(torch.tensor(1e-6)) - 1e-3)
+    ) / 2.0
+    assert loss.item() == pytest.approx(
+        float(expected_l1 + expected_charbonnier.item()),
+        abs=1e-6,
+    )
+
+
 def test_compute_flow_matching_window_loss_reflex_adr_uses_biased_direction() -> None:
     prediction = torch.tensor([[[[1.0]]]], dtype=torch.float32)
     target_clean = torch.tensor([[[[1.0]]]], dtype=torch.float32)

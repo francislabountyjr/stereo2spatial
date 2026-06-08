@@ -22,16 +22,135 @@ def _compute_loss_weighted(
 ) -> torch.Tensor:
     """Compute frame-weighted masked MSE for clean endpoint targets."""
     mse = (prediction - target_clean).pow(2)  # [B,C,D,T]
+    return _reduce_masked_reconstruction_loss(
+        loss=mse,
+        prediction=prediction,
+        valid_mask=valid_mask,
+        frame_weight=frame_weight,
+    )
+
+
+def _reduce_masked_reconstruction_loss(
+    *,
+    loss: torch.Tensor,
+    prediction: torch.Tensor,
+    valid_mask: torch.Tensor,
+    frame_weight: torch.Tensor,
+) -> torch.Tensor:
+    """Reduce a `[B,C,D,T]` reconstruction loss with frame and validity weights."""
     w = frame_weight[None, :].to(
         dtype=prediction.dtype, device=prediction.device
     )  # [1,T]
     m = valid_mask.to(dtype=prediction.dtype, device=prediction.device)  # [B,T]
     wm = (w * m)[:, None, None, :]  # [B,1,1,T]
 
-    weighted = mse * wm
+    weighted = loss * wm
     denom = wm.sum() * prediction.shape[1] * prediction.shape[2]
     denom = torch.clamp(denom, min=1.0)
     return weighted.sum() / denom
+
+
+def _charbonnier_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    eps: float = 1e-3,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """Compute smooth L1-style Charbonnier reconstruction loss."""
+    eps_f = float(eps)
+    if eps_f <= 0:
+        raise ValueError("charbonnier eps must be > 0")
+    loss = torch.sqrt((prediction - target).float().pow(2) + eps_f * eps_f) - eps_f
+    reduction_name = str(reduction).strip().lower()
+    if reduction_name == "mean":
+        return loss.mean()
+    if reduction_name == "sum":
+        return loss.sum()
+    if reduction_name == "none":
+        return loss
+    raise ValueError("charbonnier reduction must be one of: mean, sum, none")
+
+
+def _masked_waveform_reconstruction_loss(
+    *,
+    prediction: torch.Tensor,
+    target_clean: torch.Tensor,
+    valid_mask: torch.Tensor,
+    frame_weight: torch.Tensor,
+    mse_weight: float = 1.0,
+    l1_weight: float = 0.0,
+    charbonnier_weight: float = 0.0,
+    charbonnier_eps: float = 1e-3,
+    sample_loss_weight: torch.Tensor | None = None,
+    element_weight: torch.Tensor | float | None = None,
+) -> torch.Tensor:
+    """Compute a weighted sum of masked waveform reconstruction losses."""
+    pred_f = prediction.float()
+    target_f = target_clean.float()
+    total = pred_f.new_zeros(())
+    used = False
+
+    def apply_extra_weights(loss: torch.Tensor) -> torch.Tensor:
+        if element_weight is not None:
+            loss = loss * torch.as_tensor(
+                element_weight,
+                dtype=loss.dtype,
+                device=loss.device,
+            )
+        if sample_loss_weight is not None:
+            if (
+                sample_loss_weight.dim() != 1
+                or sample_loss_weight.shape[0] != prediction.shape[0]
+            ):
+                raise ValueError(
+                    "sample_loss_weight must be shape [B] matching prediction batch size."
+                )
+            loss = loss * sample_loss_weight[:, None, None, None].to(
+                dtype=loss.dtype,
+                device=loss.device,
+            )
+        return loss
+
+    if float(mse_weight) > 0.0:
+        total = total + float(mse_weight) * _reduce_masked_reconstruction_loss(
+            loss=apply_extra_weights((pred_f - target_f).pow(2)),
+            prediction=prediction,
+            valid_mask=valid_mask,
+            frame_weight=frame_weight,
+        )
+        used = True
+    if float(l1_weight) > 0.0:
+        total = total + float(l1_weight) * _reduce_masked_reconstruction_loss(
+            loss=apply_extra_weights((pred_f - target_f).abs()),
+            prediction=prediction,
+            valid_mask=valid_mask,
+            frame_weight=frame_weight,
+        )
+        used = True
+    if float(charbonnier_weight) > 0.0:
+        total = total + float(charbonnier_weight) * _reduce_masked_reconstruction_loss(
+            loss=apply_extra_weights(
+                _charbonnier_loss(
+                    pred_f,
+                    target_f,
+                    eps=float(charbonnier_eps),
+                    reduction="none",
+                )
+            ),
+            prediction=prediction,
+            valid_mask=valid_mask,
+            frame_weight=frame_weight,
+        )
+        used = True
+
+    if not used:
+        raise ValueError(
+            "At least one waveform reconstruction loss weight must be > 0 "
+            "(waveform_mse_loss_weight, waveform_l1_loss_weight, or "
+            "waveform_charbonnier_loss_weight)."
+        )
+    return total
 
 
 def _downmix_to_stereo(
@@ -447,6 +566,136 @@ def _binaural_ccf_loss(
     return total / float(2 * max_lag + 1)
 
 
+def _frame_rms_ild_loss(
+    *,
+    prediction_x1: torch.Tensor,
+    target_x1: torch.Tensor,
+    mask_dt: torch.Tensor,
+    frame_size: int = 2048,
+    hop_size: int = 1024,
+    eps: float = 1e-6,
+    silence_threshold: float = 1e-4,
+    max_weight: float = 4.0,
+) -> torch.Tensor:
+    """Compare frame-level left/right log-RMS ratios for headphone targets."""
+    if prediction_x1.shape != target_x1.shape:
+        raise ValueError(
+            "prediction_x1 and target_x1 must have matching shape, "
+            f"got {tuple(prediction_x1.shape)} and {tuple(target_x1.shape)}"
+        )
+    if prediction_x1.shape[1] != 2:
+        return prediction_x1.new_zeros(())
+    frame_size_i = int(frame_size)
+    hop_size_i = int(hop_size)
+    if frame_size_i <= 0 or hop_size_i <= 0:
+        raise ValueError("frame RMS ILD frame_size and hop_size must be > 0")
+    eps_f = float(max(eps, 1e-12))
+
+    def frame_rms(channel_audio: torch.Tensor) -> torch.Tensor:
+        if channel_audio.shape[-1] < frame_size_i:
+            channel_audio = F.pad(
+                channel_audio,
+                (0, frame_size_i - channel_audio.shape[-1]),
+            )
+        frames = channel_audio.unfold(
+            dimension=-1,
+            size=frame_size_i,
+            step=hop_size_i,
+        )
+        return frames.pow(2).mean(dim=-1).add(eps_f).sqrt()
+
+    pred_audio = _unpatch_binaural_signal_to_audio(prediction_x1, mask_dt=mask_dt)
+    target_audio = _unpatch_binaural_signal_to_audio(target_x1, mask_dt=mask_dt)
+
+    pred_l_rms = frame_rms(pred_audio[:, 0])
+    pred_r_rms = frame_rms(pred_audio[:, 1])
+    targ_l_rms = frame_rms(target_audio[:, 0])
+    targ_r_rms = frame_rms(target_audio[:, 1])
+
+    pred_ild = torch.log(pred_l_rms.clamp_min(eps_f)) - torch.log(
+        pred_r_rms.clamp_min(eps_f)
+    )
+    targ_ild = torch.log(targ_l_rms.clamp_min(eps_f)) - torch.log(
+        targ_r_rms.clamp_min(eps_f)
+    )
+
+    target_energy = 0.5 * (targ_l_rms + targ_r_rms)
+    active = target_energy > float(silence_threshold)
+    if not bool(active.any().item()):
+        return prediction_x1.new_zeros(())
+
+    weight = target_energy / target_energy[active].mean().clamp_min(eps_f)
+    weight = weight.clamp(max=float(max_weight)).detach()
+    return ((pred_ild - targ_ild).abs() * weight)[active].mean()
+
+
+def _loss_by_name(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    loss_type: str,
+    charbonnier_eps: float,
+) -> torch.Tensor:
+    loss_name = str(loss_type).strip().lower()
+    if loss_name in {"mse", "l2"}:
+        return (prediction.float() - target.float()).pow(2).mean()
+    if loss_name in {"l1", "mae"}:
+        return (prediction.float() - target.float()).abs().mean()
+    if loss_name in {"charbonnier", "charb"}:
+        return _charbonnier_loss(
+            prediction,
+            target,
+            eps=float(charbonnier_eps),
+            reduction="mean",
+        )
+    raise ValueError("loss_type must be one of: mse, l2, l1, mae, charbonnier")
+
+
+def _mid_side_loss(
+    *,
+    prediction_x1: torch.Tensor,
+    target_x1: torch.Tensor,
+    mask_dt: torch.Tensor,
+    loss_type: str = "charbonnier",
+    charbonnier_eps: float = 1e-3,
+    mid_weight: float = 0.0,
+    side_weight: float = 1.0,
+) -> torch.Tensor:
+    """Compare headphone mid and side waveforms with a selectable loss."""
+    if prediction_x1.shape != target_x1.shape:
+        raise ValueError(
+            "prediction_x1 and target_x1 must have matching shape, "
+            f"got {tuple(prediction_x1.shape)} and {tuple(target_x1.shape)}"
+        )
+    if prediction_x1.shape[1] != 2:
+        return prediction_x1.new_zeros(())
+
+    pred_audio = _unpatch_binaural_signal_to_audio(prediction_x1, mask_dt=mask_dt)
+    target_audio = _unpatch_binaural_signal_to_audio(target_x1, mask_dt=mask_dt)
+
+    pred_mid = 0.5 * (pred_audio[:, 0] + pred_audio[:, 1])
+    pred_side = 0.5 * (pred_audio[:, 0] - pred_audio[:, 1])
+    targ_mid = 0.5 * (target_audio[:, 0] + target_audio[:, 1])
+    targ_side = 0.5 * (target_audio[:, 0] - target_audio[:, 1])
+
+    total = pred_audio.new_zeros(())
+    if float(mid_weight) > 0.0:
+        total = total + float(mid_weight) * _loss_by_name(
+            pred_mid,
+            targ_mid,
+            loss_type=loss_type,
+            charbonnier_eps=charbonnier_eps,
+        )
+    if float(side_weight) > 0.0:
+        total = total + float(side_weight) * _loss_by_name(
+            pred_side,
+            targ_side,
+            loss_type=loss_type,
+            charbonnier_eps=charbonnier_eps,
+        )
+    return total
+
+
 def _binaural_cue_loss(
     *,
     prediction_x1: torch.Tensor,
@@ -459,6 +708,16 @@ def _binaural_cue_loss(
     ild_weight: float = 0.0,
     ipd_weight: float = 0.0,
     ccf_weight: float = 0.0,
+    frame_ild_weight: float = 0.0,
+    frame_ild_frame_size: int = 2048,
+    frame_ild_hop_size: int = 1024,
+    frame_ild_silence_threshold: float = 1e-4,
+    frame_ild_max_weight: float = 4.0,
+    mid_side_weight: float = 0.0,
+    mid_side_loss_type: str = "charbonnier",
+    mid_side_mid_weight: float = 0.0,
+    mid_side_side_weight: float = 1.0,
+    mid_side_charbonnier_eps: float = 1e-3,
     eps: float = 1e-7,
 ) -> torch.Tensor:
     """Aggregate optional binaural cue losses for direct headphone targets."""
@@ -484,6 +743,27 @@ def _binaural_cue_loss(
             mask_dt=mask_dt,
             sample_rate=int(sample_rate),
             eps=float(eps),
+        )
+    if float(frame_ild_weight) > 0.0:
+        total = total + float(frame_ild_weight) * _frame_rms_ild_loss(
+            prediction_x1=prediction_x1,
+            target_x1=target_x1,
+            mask_dt=mask_dt,
+            frame_size=int(frame_ild_frame_size),
+            hop_size=int(frame_ild_hop_size),
+            eps=float(eps),
+            silence_threshold=float(frame_ild_silence_threshold),
+            max_weight=float(frame_ild_max_weight),
+        )
+    if float(mid_side_weight) > 0.0:
+        total = total + float(mid_side_weight) * _mid_side_loss(
+            prediction_x1=prediction_x1,
+            target_x1=target_x1,
+            mask_dt=mask_dt,
+            loss_type=mid_side_loss_type,
+            charbonnier_eps=float(mid_side_charbonnier_eps),
+            mid_weight=float(mid_side_mid_weight),
+            side_weight=float(mid_side_side_weight),
         )
     return total
 

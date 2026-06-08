@@ -140,6 +140,12 @@ def _run_training_step(
                 mrstft_sc_weight=settings.mrstft_sc_weight,
                 mrstft_log_mag_weight=settings.mrstft_log_mag_weight,
                 mrstft_eps=settings.mrstft_eps,
+                waveform_mse_loss_weight=settings.waveform_mse_loss_weight,
+                waveform_l1_loss_weight=settings.waveform_l1_loss_weight,
+                waveform_charbonnier_loss_weight=(
+                    settings.waveform_charbonnier_loss_weight
+                ),
+                waveform_charbonnier_eps=settings.waveform_charbonnier_eps,
                 perceptual_loss_weight=settings.perceptual_loss_weight,
                 perceptual_sample_rate=settings.perceptual_sample_rate,
                 perceptual_n_fft=settings.perceptual_n_fft,
@@ -155,6 +161,26 @@ def _run_training_step(
                 binaural_ild_loss_weight=settings.binaural_ild_loss_weight,
                 binaural_ipd_loss_weight=settings.binaural_ipd_loss_weight,
                 binaural_ccf_loss_weight=settings.binaural_ccf_loss_weight,
+                binaural_frame_ild_loss_weight=(
+                    settings.binaural_frame_ild_loss_weight
+                ),
+                binaural_frame_ild_frame_size=(
+                    settings.binaural_frame_ild_frame_size
+                ),
+                binaural_frame_ild_hop_size=settings.binaural_frame_ild_hop_size,
+                binaural_frame_ild_silence_threshold=(
+                    settings.binaural_frame_ild_silence_threshold
+                ),
+                binaural_frame_ild_max_weight=(
+                    settings.binaural_frame_ild_max_weight
+                ),
+                binaural_mid_side_loss_weight=settings.binaural_mid_side_loss_weight,
+                binaural_mid_side_loss_type=settings.binaural_mid_side_loss_type,
+                binaural_mid_side_mid_weight=settings.binaural_mid_side_mid_weight,
+                binaural_mid_side_side_weight=settings.binaural_mid_side_side_weight,
+                binaural_mid_side_charbonnier_eps=(
+                    settings.binaural_mid_side_charbonnier_eps
+                ),
                 binaural_loss_warmup_steps=settings.binaural_loss_warmup_steps,
                 binaural_sample_rate=settings.binaural_sample_rate,
                 binaural_loss_eps=settings.binaural_loss_eps,
@@ -193,6 +219,12 @@ def _run_training_step(
                 mrstft_sc_weight=settings.mrstft_sc_weight,
                 mrstft_log_mag_weight=settings.mrstft_log_mag_weight,
                 mrstft_eps=settings.mrstft_eps,
+                waveform_mse_loss_weight=settings.waveform_mse_loss_weight,
+                waveform_l1_loss_weight=settings.waveform_l1_loss_weight,
+                waveform_charbonnier_loss_weight=(
+                    settings.waveform_charbonnier_loss_weight
+                ),
+                waveform_charbonnier_eps=settings.waveform_charbonnier_eps,
                 perceptual_loss_weight=settings.perceptual_loss_weight,
                 perceptual_sample_rate=settings.perceptual_sample_rate,
                 perceptual_n_fft=settings.perceptual_n_fft,
@@ -208,6 +240,26 @@ def _run_training_step(
                 binaural_ild_loss_weight=settings.binaural_ild_loss_weight,
                 binaural_ipd_loss_weight=settings.binaural_ipd_loss_weight,
                 binaural_ccf_loss_weight=settings.binaural_ccf_loss_weight,
+                binaural_frame_ild_loss_weight=(
+                    settings.binaural_frame_ild_loss_weight
+                ),
+                binaural_frame_ild_frame_size=(
+                    settings.binaural_frame_ild_frame_size
+                ),
+                binaural_frame_ild_hop_size=settings.binaural_frame_ild_hop_size,
+                binaural_frame_ild_silence_threshold=(
+                    settings.binaural_frame_ild_silence_threshold
+                ),
+                binaural_frame_ild_max_weight=(
+                    settings.binaural_frame_ild_max_weight
+                ),
+                binaural_mid_side_loss_weight=settings.binaural_mid_side_loss_weight,
+                binaural_mid_side_loss_type=settings.binaural_mid_side_loss_type,
+                binaural_mid_side_mid_weight=settings.binaural_mid_side_mid_weight,
+                binaural_mid_side_side_weight=settings.binaural_mid_side_side_weight,
+                binaural_mid_side_charbonnier_eps=(
+                    settings.binaural_mid_side_charbonnier_eps
+                ),
                 binaural_loss_warmup_steps=settings.binaural_loss_warmup_steps,
                 binaural_sample_rate=settings.binaural_sample_rate,
                 binaural_loss_eps=settings.binaural_loss_eps,

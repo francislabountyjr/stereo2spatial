@@ -47,6 +47,10 @@ class TrainerRuntimeSettings:
     mrstft_sc_weight: float
     mrstft_log_mag_weight: float
     mrstft_eps: float
+    waveform_mse_loss_weight: float
+    waveform_l1_loss_weight: float
+    waveform_charbonnier_loss_weight: float
+    waveform_charbonnier_eps: float
     perceptual_loss_weight: float
     perceptual_sample_rate: int
     perceptual_n_fft: int
@@ -62,6 +66,16 @@ class TrainerRuntimeSettings:
     binaural_ild_loss_weight: float
     binaural_ipd_loss_weight: float
     binaural_ccf_loss_weight: float
+    binaural_frame_ild_loss_weight: float
+    binaural_frame_ild_frame_size: int
+    binaural_frame_ild_hop_size: int
+    binaural_frame_ild_silence_threshold: float
+    binaural_frame_ild_max_weight: float
+    binaural_mid_side_loss_weight: float
+    binaural_mid_side_loss_type: str
+    binaural_mid_side_mid_weight: float
+    binaural_mid_side_side_weight: float
+    binaural_mid_side_charbonnier_eps: float
     binaural_loss_warmup_steps: int
     binaural_sample_rate: int
     binaural_loss_eps: float
@@ -128,6 +142,18 @@ def resolve_trainer_runtime_settings(config: TrainConfig) -> TrainerRuntimeSetti
         getattr(config.training, "mrstft_log_mag_weight", 1.0)
     )
     mrstft_eps = float(getattr(config.training, "mrstft_eps", 1e-7))
+    waveform_mse_loss_weight = float(
+        getattr(config.training, "waveform_mse_loss_weight", 1.0)
+    )
+    waveform_l1_loss_weight = float(
+        getattr(config.training, "waveform_l1_loss_weight", 0.0)
+    )
+    waveform_charbonnier_loss_weight = float(
+        getattr(config.training, "waveform_charbonnier_loss_weight", 0.0)
+    )
+    waveform_charbonnier_eps = float(
+        getattr(config.training, "waveform_charbonnier_eps", 1e-3)
+    )
     perceptual_loss_weight = float(
         getattr(config.training, "perceptual_loss_weight", 0.0)
     )
@@ -157,6 +183,36 @@ def resolve_trainer_runtime_settings(config: TrainConfig) -> TrainerRuntimeSetti
     binaural_ccf_loss_weight = float(
         getattr(config.training, "binaural_ccf_loss_weight", 0.0)
     )
+    binaural_frame_ild_loss_weight = float(
+        getattr(config.training, "binaural_frame_ild_loss_weight", 0.0)
+    )
+    binaural_frame_ild_frame_size = int(
+        getattr(config.training, "binaural_frame_ild_frame_size", 2048)
+    )
+    binaural_frame_ild_hop_size = int(
+        getattr(config.training, "binaural_frame_ild_hop_size", 1024)
+    )
+    binaural_frame_ild_silence_threshold = float(
+        getattr(config.training, "binaural_frame_ild_silence_threshold", 1e-4)
+    )
+    binaural_frame_ild_max_weight = float(
+        getattr(config.training, "binaural_frame_ild_max_weight", 4.0)
+    )
+    binaural_mid_side_loss_weight = float(
+        getattr(config.training, "binaural_mid_side_loss_weight", 0.0)
+    )
+    binaural_mid_side_loss_type = str(
+        getattr(config.training, "binaural_mid_side_loss_type", "charbonnier")
+    )
+    binaural_mid_side_mid_weight = float(
+        getattr(config.training, "binaural_mid_side_mid_weight", 0.0)
+    )
+    binaural_mid_side_side_weight = float(
+        getattr(config.training, "binaural_mid_side_side_weight", 1.0)
+    )
+    binaural_mid_side_charbonnier_eps = float(
+        getattr(config.training, "binaural_mid_side_charbonnier_eps", 1e-3)
+    )
     binaural_loss_warmup_steps = int(
         max(0, int(getattr(config.training, "binaural_loss_warmup_steps", 0)))
     )
@@ -171,6 +227,8 @@ def resolve_trainer_runtime_settings(config: TrainConfig) -> TrainerRuntimeSetti
         or binaural_ild_loss_weight > 0.0
         or binaural_ipd_loss_weight > 0.0
         or binaural_ccf_loss_weight > 0.0
+        or binaural_frame_ild_loss_weight > 0.0
+        or binaural_mid_side_loss_weight > 0.0
     )
 
     return TrainerRuntimeSettings(
@@ -210,6 +268,10 @@ def resolve_trainer_runtime_settings(config: TrainConfig) -> TrainerRuntimeSetti
         mrstft_sc_weight=mrstft_sc_weight,
         mrstft_log_mag_weight=mrstft_log_mag_weight,
         mrstft_eps=mrstft_eps,
+        waveform_mse_loss_weight=waveform_mse_loss_weight,
+        waveform_l1_loss_weight=waveform_l1_loss_weight,
+        waveform_charbonnier_loss_weight=waveform_charbonnier_loss_weight,
+        waveform_charbonnier_eps=waveform_charbonnier_eps,
         perceptual_loss_weight=perceptual_loss_weight,
         perceptual_sample_rate=perceptual_sample_rate,
         perceptual_n_fft=perceptual_n_fft,
@@ -225,6 +287,16 @@ def resolve_trainer_runtime_settings(config: TrainConfig) -> TrainerRuntimeSetti
         binaural_ild_loss_weight=binaural_ild_loss_weight,
         binaural_ipd_loss_weight=binaural_ipd_loss_weight,
         binaural_ccf_loss_weight=binaural_ccf_loss_weight,
+        binaural_frame_ild_loss_weight=binaural_frame_ild_loss_weight,
+        binaural_frame_ild_frame_size=binaural_frame_ild_frame_size,
+        binaural_frame_ild_hop_size=binaural_frame_ild_hop_size,
+        binaural_frame_ild_silence_threshold=binaural_frame_ild_silence_threshold,
+        binaural_frame_ild_max_weight=binaural_frame_ild_max_weight,
+        binaural_mid_side_loss_weight=binaural_mid_side_loss_weight,
+        binaural_mid_side_loss_type=binaural_mid_side_loss_type,
+        binaural_mid_side_mid_weight=binaural_mid_side_mid_weight,
+        binaural_mid_side_side_weight=binaural_mid_side_side_weight,
+        binaural_mid_side_charbonnier_eps=binaural_mid_side_charbonnier_eps,
         binaural_loss_warmup_steps=binaural_loss_warmup_steps,
         binaural_sample_rate=binaural_sample_rate,
         binaural_loss_eps=binaural_loss_eps,

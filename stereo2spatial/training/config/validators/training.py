@@ -286,6 +286,30 @@ def validate_training_aux_losses(config: TrainConfig) -> None:
         "training.mrstft_log_mag_weight",
     )
     require_positive(config.training.mrstft_eps, "training.mrstft_eps")
+    require_non_negative(
+        config.training.waveform_mse_loss_weight,
+        "training.waveform_mse_loss_weight",
+    )
+    require_non_negative(
+        config.training.waveform_l1_loss_weight,
+        "training.waveform_l1_loss_weight",
+    )
+    require_non_negative(
+        config.training.waveform_charbonnier_loss_weight,
+        "training.waveform_charbonnier_loss_weight",
+    )
+    require_positive(
+        config.training.waveform_charbonnier_eps,
+        "training.waveform_charbonnier_eps",
+    )
+    if (
+        float(config.training.waveform_mse_loss_weight)
+        + float(config.training.waveform_l1_loss_weight)
+        + float(config.training.waveform_charbonnier_loss_weight)
+    ) <= 0.0:
+        raise ValueError(
+            "At least one waveform reconstruction loss weight must be > 0"
+        )
     stft_lists = (
         config.training.mrstft_fft_sizes,
         config.training.mrstft_hop_lengths,
@@ -366,6 +390,48 @@ def validate_training_aux_losses(config: TrainConfig) -> None:
         "training.binaural_ccf_loss_weight",
     )
     require_non_negative(
+        config.training.binaural_frame_ild_loss_weight,
+        "training.binaural_frame_ild_loss_weight",
+    )
+    require_positive(
+        config.training.binaural_frame_ild_frame_size,
+        "training.binaural_frame_ild_frame_size",
+    )
+    require_positive(
+        config.training.binaural_frame_ild_hop_size,
+        "training.binaural_frame_ild_hop_size",
+    )
+    require_non_negative(
+        config.training.binaural_frame_ild_silence_threshold,
+        "training.binaural_frame_ild_silence_threshold",
+    )
+    require_positive(
+        config.training.binaural_frame_ild_max_weight,
+        "training.binaural_frame_ild_max_weight",
+    )
+    require_non_negative(
+        config.training.binaural_mid_side_loss_weight,
+        "training.binaural_mid_side_loss_weight",
+    )
+    mid_side_loss = str(config.training.binaural_mid_side_loss_type).strip().lower()
+    if mid_side_loss not in {"mse", "l2", "l1", "mae", "charbonnier", "charb"}:
+        raise ValueError(
+            "training.binaural_mid_side_loss_type must be one of: "
+            "mse, l2, l1, mae, charbonnier, charb"
+        )
+    require_non_negative(
+        config.training.binaural_mid_side_mid_weight,
+        "training.binaural_mid_side_mid_weight",
+    )
+    require_non_negative(
+        config.training.binaural_mid_side_side_weight,
+        "training.binaural_mid_side_side_weight",
+    )
+    require_positive(
+        config.training.binaural_mid_side_charbonnier_eps,
+        "training.binaural_mid_side_charbonnier_eps",
+    )
+    require_non_negative(
         config.training.binaural_loss_warmup_steps,
         "training.binaural_loss_warmup_steps",
     )
@@ -380,6 +446,8 @@ def validate_training_aux_losses(config: TrainConfig) -> None:
         or config.training.binaural_ild_loss_weight > 0
         or config.training.binaural_ipd_loss_weight > 0
         or config.training.binaural_ccf_loss_weight > 0
+        or config.training.binaural_frame_ild_loss_weight > 0
+        or config.training.binaural_mid_side_loss_weight > 0
     ) and config.training.tbptt_windows > 0:
         raise ValueError(
             "waveform auxiliary losses currently require " "training.tbptt_windows=0."

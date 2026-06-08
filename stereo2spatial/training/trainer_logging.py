@@ -92,11 +92,25 @@ def log_training_setup(
     print(f"  - corr_offdiag_only={settings.corr_offdiag_only}")
     print(f"  - corr_use_correlation={settings.corr_use_correlation}")
     print(f"  - downmix_consistency_weight={settings.downmix_consistency_weight}")
+    print(f"  - waveform_mse_loss_weight={settings.waveform_mse_loss_weight}")
+    print(f"  - waveform_l1_loss_weight={settings.waveform_l1_loss_weight}")
+    print(
+        "  - waveform_charbonnier_loss_weight="
+        f"{settings.waveform_charbonnier_loss_weight}"
+    )
     print(f"  - mrstft_loss_weight={settings.mrstft_loss_weight}")
     print(f"  - perceptual_loss_weight={settings.perceptual_loss_weight}")
     print(f"  - binaural_ild_loss_weight={settings.binaural_ild_loss_weight}")
     print(f"  - binaural_ipd_loss_weight={settings.binaural_ipd_loss_weight}")
     print(f"  - binaural_ccf_loss_weight={settings.binaural_ccf_loss_weight}")
+    print(
+        "  - binaural_frame_ild_loss_weight="
+        f"{settings.binaural_frame_ild_loss_weight}"
+    )
+    print(
+        "  - binaural_mid_side_loss_weight="
+        f"{settings.binaural_mid_side_loss_weight}"
+    )
 
     if isinstance(optimizer, torch.optim.AdamW):
         print(f"  - adamw_fused={bool(optimizer.defaults.get('fused', False))}")

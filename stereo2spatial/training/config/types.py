@@ -152,6 +152,10 @@ class TrainingConfig:
     mrstft_sc_weight: float = 1.0
     mrstft_log_mag_weight: float = 1.0
     mrstft_eps: float = 1e-7
+    waveform_mse_loss_weight: float = 1.0
+    waveform_l1_loss_weight: float = 0.0
+    waveform_charbonnier_loss_weight: float = 0.0
+    waveform_charbonnier_eps: float = 1e-3
     perceptual_loss_weight: float = 0.0
     perceptual_n_fft: int = 1024
     perceptual_hop_length: int = 256
@@ -166,6 +170,16 @@ class TrainingConfig:
     binaural_ild_loss_weight: float = 0.0
     binaural_ipd_loss_weight: float = 0.0
     binaural_ccf_loss_weight: float = 0.0
+    binaural_frame_ild_loss_weight: float = 0.0
+    binaural_frame_ild_frame_size: int = 2048
+    binaural_frame_ild_hop_size: int = 1024
+    binaural_frame_ild_silence_threshold: float = 1e-4
+    binaural_frame_ild_max_weight: float = 4.0
+    binaural_mid_side_loss_weight: float = 0.0
+    binaural_mid_side_loss_type: str = "charbonnier"
+    binaural_mid_side_mid_weight: float = 0.0
+    binaural_mid_side_side_weight: float = 1.0
+    binaural_mid_side_charbonnier_eps: float = 1e-3
     binaural_loss_warmup_steps: int = 0
     binaural_loss_eps: float = 1e-7
     scheduled_sampling_max_step_offset: int = 0

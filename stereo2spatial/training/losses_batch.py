@@ -102,6 +102,16 @@ def _apply_aux_losses_and_collect(
     binaural_ild_loss_weight: float,
     binaural_ipd_loss_weight: float,
     binaural_ccf_loss_weight: float,
+    binaural_frame_ild_loss_weight: float,
+    binaural_frame_ild_frame_size: int,
+    binaural_frame_ild_hop_size: int,
+    binaural_frame_ild_silence_threshold: float,
+    binaural_frame_ild_max_weight: float,
+    binaural_mid_side_loss_weight: float,
+    binaural_mid_side_loss_type: str,
+    binaural_mid_side_mid_weight: float,
+    binaural_mid_side_side_weight: float,
+    binaural_mid_side_charbonnier_eps: float,
     binaural_loss_warmup_steps: int,
     binaural_sample_rate: int,
     binaural_loss_eps: float,
@@ -200,6 +210,8 @@ def _apply_aux_losses_and_collect(
         float(binaural_ild_loss_weight) > 0.0
         or float(binaural_ipd_loss_weight) > 0.0
         or float(binaural_ccf_loss_weight) > 0.0
+        or float(binaural_frame_ild_loss_weight) > 0.0
+        or float(binaural_mid_side_loss_weight) > 0.0
     ):
         warmup_steps = max(0, int(binaural_loss_warmup_steps))
         warmup = (
@@ -219,6 +231,18 @@ def _apply_aux_losses_and_collect(
                 ild_weight=float(binaural_ild_loss_weight) * warmup,
                 ipd_weight=float(binaural_ipd_loss_weight) * warmup,
                 ccf_weight=float(binaural_ccf_loss_weight) * warmup,
+                frame_ild_weight=float(binaural_frame_ild_loss_weight) * warmup,
+                frame_ild_frame_size=int(binaural_frame_ild_frame_size),
+                frame_ild_hop_size=int(binaural_frame_ild_hop_size),
+                frame_ild_silence_threshold=float(
+                    binaural_frame_ild_silence_threshold
+                ),
+                frame_ild_max_weight=float(binaural_frame_ild_max_weight),
+                mid_side_weight=float(binaural_mid_side_loss_weight) * warmup,
+                mid_side_loss_type=binaural_mid_side_loss_type,
+                mid_side_mid_weight=float(binaural_mid_side_mid_weight),
+                mid_side_side_weight=float(binaural_mid_side_side_weight),
+                mid_side_charbonnier_eps=float(binaural_mid_side_charbonnier_eps),
                 eps=float(binaural_loss_eps),
             )
             window_loss = window_loss + l_binaural
@@ -302,6 +326,10 @@ def _compute_batch_flow_matching_loss(
     mrstft_sc_weight: float = 1.0,
     mrstft_log_mag_weight: float = 1.0,
     mrstft_eps: float = 1e-7,
+    waveform_mse_loss_weight: float = 1.0,
+    waveform_l1_loss_weight: float = 0.0,
+    waveform_charbonnier_loss_weight: float = 0.0,
+    waveform_charbonnier_eps: float = 1e-3,
     perceptual_loss_weight: float = 0.0,
     perceptual_sample_rate: int = 48000,
     perceptual_n_fft: int = 1024,
@@ -317,6 +345,16 @@ def _compute_batch_flow_matching_loss(
     binaural_ild_loss_weight: float = 0.0,
     binaural_ipd_loss_weight: float = 0.0,
     binaural_ccf_loss_weight: float = 0.0,
+    binaural_frame_ild_loss_weight: float = 0.0,
+    binaural_frame_ild_frame_size: int = 2048,
+    binaural_frame_ild_hop_size: int = 1024,
+    binaural_frame_ild_silence_threshold: float = 1e-4,
+    binaural_frame_ild_max_weight: float = 4.0,
+    binaural_mid_side_loss_weight: float = 0.0,
+    binaural_mid_side_loss_type: str = "charbonnier",
+    binaural_mid_side_mid_weight: float = 0.0,
+    binaural_mid_side_side_weight: float = 1.0,
+    binaural_mid_side_charbonnier_eps: float = 1e-3,
     binaural_loss_warmup_steps: int = 0,
     binaural_sample_rate: int = 48000,
     binaural_loss_eps: float = 1e-7,
@@ -400,6 +438,8 @@ def _compute_batch_flow_matching_loss(
         or (float(binaural_ild_loss_weight) > 0.0)
         or (float(binaural_ipd_loss_weight) > 0.0)
         or (float(binaural_ccf_loss_weight) > 0.0)
+        or (float(binaural_frame_ild_loss_weight) > 0.0)
+        or (float(binaural_mid_side_loss_weight) > 0.0)
     )
     resolved_mrstft_fft_sizes = (
         [512, 1024, 2048] if mrstft_fft_sizes is None else mrstft_fft_sizes
@@ -501,6 +541,10 @@ def _compute_batch_flow_matching_loss(
             valid_mask=vm_w,
             frame_weight=weight,
             sample_loss_weight=inputs.loss_weight,
+            waveform_mse_loss_weight=waveform_mse_loss_weight,
+            waveform_l1_loss_weight=waveform_l1_loss_weight,
+            waveform_charbonnier_loss_weight=waveform_charbonnier_loss_weight,
+            waveform_charbonnier_eps=waveform_charbonnier_eps,
             reflex_enabled=reflexflow.enabled,
             reflex_clean_pred=clean_pred_w,
             reflex_biased_pred=biased_pred_w,
@@ -554,6 +598,20 @@ def _compute_batch_flow_matching_loss(
                 binaural_ild_loss_weight=binaural_ild_loss_weight,
                 binaural_ipd_loss_weight=binaural_ipd_loss_weight,
                 binaural_ccf_loss_weight=binaural_ccf_loss_weight,
+                binaural_frame_ild_loss_weight=binaural_frame_ild_loss_weight,
+                binaural_frame_ild_frame_size=binaural_frame_ild_frame_size,
+                binaural_frame_ild_hop_size=binaural_frame_ild_hop_size,
+                binaural_frame_ild_silence_threshold=(
+                    binaural_frame_ild_silence_threshold
+                ),
+                binaural_frame_ild_max_weight=binaural_frame_ild_max_weight,
+                binaural_mid_side_loss_weight=binaural_mid_side_loss_weight,
+                binaural_mid_side_loss_type=binaural_mid_side_loss_type,
+                binaural_mid_side_mid_weight=binaural_mid_side_mid_weight,
+                binaural_mid_side_side_weight=binaural_mid_side_side_weight,
+                binaural_mid_side_charbonnier_eps=(
+                    binaural_mid_side_charbonnier_eps
+                ),
                 binaural_loss_warmup_steps=binaural_loss_warmup_steps,
                 binaural_sample_rate=binaural_sample_rate,
                 binaural_loss_eps=binaural_loss_eps,

@@ -10,6 +10,7 @@ import torch
 from accelerate import Accelerator
 from torch.distributions import Beta
 
+from .loss_terms import _masked_waveform_reconstruction_loss
 from .windowing import _chunk_weight, _segment_starts
 
 WindowMetadata = dict[int, tuple[list[int], list[torch.Tensor]]]
@@ -366,6 +367,10 @@ def compute_flow_matching_window_loss(
     valid_mask: torch.Tensor,  # [B,T]
     frame_weight: torch.Tensor,  # [T]
     sample_loss_weight: torch.Tensor | None = None,  # [B]
+    waveform_mse_loss_weight: float = 1.0,
+    waveform_l1_loss_weight: float = 0.0,
+    waveform_charbonnier_loss_weight: float = 0.0,
+    waveform_charbonnier_eps: float = 1e-3,
     reflex_enabled: bool = False,
     reflex_clean_pred: torch.Tensor | None = None,  # [B,C,D,T]
     reflex_biased_pred: torch.Tensor | None = None,  # [B,C,D,T]
@@ -384,37 +389,36 @@ def compute_flow_matching_window_loss(
     """
     pred_f = prediction.float()
     target_f = target_clean.float()
-    mse = (pred_f - target_f).pow(2)
+    element_weight: torch.Tensor | float | None = None
 
     if reflex_enabled:
         if reflex_clean_pred is not None and reflex_biased_pred is not None:
             exposure = (reflex_clean_pred - reflex_biased_pred).detach().to(
-                dtype=mse.dtype,
-                device=mse.device,
+                dtype=pred_f.dtype,
+                device=pred_f.device,
             )
             norm_dims = tuple(range(1, exposure.dim()))
             exposure_norm = exposure.abs().sum(dim=norm_dims, keepdim=True).clamp_min(1e-6)
             if float(reflex_alpha) != 0.0:
-                mse = mse * (1.0 + float(reflex_alpha) * exposure / exposure_norm)
+                element_weight = 1.0 + float(reflex_alpha) * exposure / exposure_norm
         if float(reflex_beta2) != 1.0:
-            mse = mse * float(reflex_beta2)
+            if element_weight is None:
+                element_weight = float(reflex_beta2)
+            else:
+                element_weight = element_weight * float(reflex_beta2)
 
-    if sample_loss_weight is not None:
-        if sample_loss_weight.dim() != 1 or sample_loss_weight.shape[0] != prediction.shape[0]:
-            raise ValueError(
-                "sample_loss_weight must be shape [B] matching prediction batch size."
-            )
-        mse = mse * sample_loss_weight[:, None, None, None].to(
-            dtype=mse.dtype,
-            device=mse.device,
-        )
-
-    w = frame_weight[None, :].to(dtype=pred_f.dtype, device=pred_f.device)
-    m = valid_mask.to(dtype=pred_f.dtype, device=pred_f.device)
-    wm = (w * m)[:, None, None, :]
-    denom = wm.sum() * prediction.shape[1] * prediction.shape[2]
-    denom = torch.clamp(denom, min=1.0)
-    loss = (mse * wm).sum() / denom
+    loss = _masked_waveform_reconstruction_loss(
+        prediction=prediction,
+        target_clean=target_clean,
+        valid_mask=valid_mask,
+        frame_weight=frame_weight,
+        mse_weight=float(waveform_mse_loss_weight),
+        l1_weight=float(waveform_l1_loss_weight),
+        charbonnier_weight=float(waveform_charbonnier_loss_weight),
+        charbonnier_eps=float(waveform_charbonnier_eps),
+        sample_loss_weight=sample_loss_weight,
+        element_weight=element_weight,
+    )
 
     if reflex_enabled and float(reflex_beta1) != 0.0:
         mask4 = valid_mask[:, None, None, :].to(dtype=pred_f.dtype, device=pred_f.device)

@@ -119,6 +119,10 @@ def test_load_config_reads_scheduled_sampling_fields(tmp_path: Path) -> None:
         "mrstft_sc_weight": 0.75,
         "mrstft_log_mag_weight": 0.5,
         "mrstft_eps": 1e-6,
+        "waveform_mse_loss_weight": 0.25,
+        "waveform_l1_loss_weight": 0.5,
+        "waveform_charbonnier_loss_weight": 0.75,
+        "waveform_charbonnier_eps": 1e-4,
         "perceptual_loss_weight": 0.03,
         "perceptual_n_fft": 512,
         "perceptual_hop_length": 128,
@@ -133,6 +137,16 @@ def test_load_config_reads_scheduled_sampling_fields(tmp_path: Path) -> None:
         "binaural_ild_loss_weight": 0.03,
         "binaural_ipd_loss_weight": 0.01,
         "binaural_ccf_loss_weight": 0.02,
+        "binaural_frame_ild_loss_weight": 0.005,
+        "binaural_frame_ild_frame_size": 1024,
+        "binaural_frame_ild_hop_size": 512,
+        "binaural_frame_ild_silence_threshold": 2e-4,
+        "binaural_frame_ild_max_weight": 3.5,
+        "binaural_mid_side_loss_weight": 0.02,
+        "binaural_mid_side_loss_type": "l1",
+        "binaural_mid_side_mid_weight": 0.1,
+        "binaural_mid_side_side_weight": 0.9,
+        "binaural_mid_side_charbonnier_eps": 2e-3,
         "binaural_loss_warmup_steps": 20000,
         "binaural_loss_eps": 1e-6,
         "validation_generation_solver": "res6s",
@@ -207,6 +221,10 @@ def test_load_config_reads_scheduled_sampling_fields(tmp_path: Path) -> None:
     assert config.training.mrstft_sc_weight == pytest.approx(0.75)
     assert config.training.mrstft_log_mag_weight == pytest.approx(0.5)
     assert config.training.mrstft_eps == pytest.approx(1e-6)
+    assert config.training.waveform_mse_loss_weight == pytest.approx(0.25)
+    assert config.training.waveform_l1_loss_weight == pytest.approx(0.5)
+    assert config.training.waveform_charbonnier_loss_weight == pytest.approx(0.75)
+    assert config.training.waveform_charbonnier_eps == pytest.approx(1e-4)
     assert config.training.perceptual_loss_weight == pytest.approx(0.03)
     assert config.training.perceptual_n_fft == 512
     assert config.training.perceptual_hop_length == 128
@@ -221,6 +239,16 @@ def test_load_config_reads_scheduled_sampling_fields(tmp_path: Path) -> None:
     assert config.training.binaural_ild_loss_weight == pytest.approx(0.03)
     assert config.training.binaural_ipd_loss_weight == pytest.approx(0.01)
     assert config.training.binaural_ccf_loss_weight == pytest.approx(0.02)
+    assert config.training.binaural_frame_ild_loss_weight == pytest.approx(0.005)
+    assert config.training.binaural_frame_ild_frame_size == 1024
+    assert config.training.binaural_frame_ild_hop_size == 512
+    assert config.training.binaural_frame_ild_silence_threshold == pytest.approx(2e-4)
+    assert config.training.binaural_frame_ild_max_weight == pytest.approx(3.5)
+    assert config.training.binaural_mid_side_loss_weight == pytest.approx(0.02)
+    assert config.training.binaural_mid_side_loss_type == "l1"
+    assert config.training.binaural_mid_side_mid_weight == pytest.approx(0.1)
+    assert config.training.binaural_mid_side_side_weight == pytest.approx(0.9)
+    assert config.training.binaural_mid_side_charbonnier_eps == pytest.approx(2e-3)
     assert config.training.binaural_loss_warmup_steps == 20000
     assert config.training.binaural_loss_eps == pytest.approx(1e-6)
     assert config.training.validation_generation_solver == "res6s"

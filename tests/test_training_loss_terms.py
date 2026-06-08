@@ -7,9 +7,12 @@ from stereo2spatial.training.loss_terms import (
     _binaural_ccf_loss,
     _binaural_cue_loss,
     _binaural_stft_cue_loss,
+    _charbonnier_loss,
     _channel_correlation_l1_loss,
     _downmix_consistency_loss,
     _downmix_to_stereo,
+    _frame_rms_ild_loss,
+    _mid_side_loss,
     _multi_resolution_stft_loss,
     _stereo_log_mel_perceptual_loss,
 )
@@ -97,6 +100,16 @@ def test_downmix_consistency_loss_compares_against_target_downmix_signal() -> No
     )
 
     assert loss.item() == pytest.approx(0.5, abs=1e-7)
+
+
+def test_charbonnier_loss_matches_smooth_l1_formula() -> None:
+    prediction = torch.tensor([0.0, 2.0], dtype=torch.float32)
+    target = torch.tensor([0.0, 1.0], dtype=torch.float32)
+
+    loss = _charbonnier_loss(prediction, target, eps=1e-3, reduction="none")
+
+    expected = torch.sqrt(torch.tensor([1e-6, 1.0 + 1e-6])) - 1e-3
+    assert torch.allclose(loss, expected, atol=1e-7, rtol=1e-7)
 
 
 def test_multi_resolution_stft_loss_is_zero_for_matching_waveforms() -> None:
@@ -190,6 +203,44 @@ def test_binaural_ccf_loss_is_zero_for_matching_headphone_audio() -> None:
     )
 
     assert loss.item() == pytest.approx(0.0, abs=1e-7)
+
+
+def test_frame_rms_ild_loss_penalizes_level_ratio_difference() -> None:
+    target = torch.zeros(1, 2, 16, 4)
+    target[:, 0] = 1.0
+    target[:, 1] = 0.5
+    prediction = target.clone()
+    prediction[:, 1] = 1.0
+    mask_dt = torch.ones(1, 16, 4)
+
+    loss = _frame_rms_ild_loss(
+        prediction_x1=prediction,
+        target_x1=target,
+        mask_dt=mask_dt,
+        frame_size=16,
+        hop_size=8,
+    )
+
+    assert loss.item() > 0.0
+
+
+def test_mid_side_loss_can_use_l1_side_only() -> None:
+    target = torch.zeros(1, 2, 2, 2)
+    prediction = target.clone()
+    prediction[:, 0] = 1.0
+    prediction[:, 1] = -1.0
+    mask_dt = torch.ones(1, 2, 2)
+
+    loss = _mid_side_loss(
+        prediction_x1=prediction,
+        target_x1=target,
+        mask_dt=mask_dt,
+        loss_type="l1",
+        mid_weight=0.0,
+        side_weight=1.0,
+    )
+
+    assert loss.item() == pytest.approx(1.0, abs=1e-7)
 
 
 def test_binaural_cue_loss_ignores_non_headphone_targets() -> None:

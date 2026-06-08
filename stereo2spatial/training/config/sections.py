@@ -398,6 +398,18 @@ def _build_training_aux_loss_fields(training_raw: dict[str, Any]) -> dict[str, A
         "mrstft_sc_weight": float(training_raw.get("mrstft_sc_weight", 1.0)),
         "mrstft_log_mag_weight": float(training_raw.get("mrstft_log_mag_weight", 1.0)),
         "mrstft_eps": float(training_raw.get("mrstft_eps", 1e-7)),
+        "waveform_mse_loss_weight": float(
+            training_raw.get("waveform_mse_loss_weight", 1.0)
+        ),
+        "waveform_l1_loss_weight": float(
+            training_raw.get("waveform_l1_loss_weight", 0.0)
+        ),
+        "waveform_charbonnier_loss_weight": float(
+            training_raw.get("waveform_charbonnier_loss_weight", 0.0)
+        ),
+        "waveform_charbonnier_eps": float(
+            training_raw.get("waveform_charbonnier_eps", 1e-3)
+        ),
         "perceptual_loss_weight": float(
             training_raw.get("perceptual_loss_weight", 0.0)
         ),
@@ -425,6 +437,36 @@ def _build_training_aux_loss_fields(training_raw: dict[str, Any]) -> dict[str, A
         ),
         "binaural_ccf_loss_weight": float(
             training_raw.get("binaural_ccf_loss_weight", 0.0)
+        ),
+        "binaural_frame_ild_loss_weight": float(
+            training_raw.get("binaural_frame_ild_loss_weight", 0.0)
+        ),
+        "binaural_frame_ild_frame_size": int(
+            training_raw.get("binaural_frame_ild_frame_size", 2048)
+        ),
+        "binaural_frame_ild_hop_size": int(
+            training_raw.get("binaural_frame_ild_hop_size", 1024)
+        ),
+        "binaural_frame_ild_silence_threshold": float(
+            training_raw.get("binaural_frame_ild_silence_threshold", 1e-4)
+        ),
+        "binaural_frame_ild_max_weight": float(
+            training_raw.get("binaural_frame_ild_max_weight", 4.0)
+        ),
+        "binaural_mid_side_loss_weight": float(
+            training_raw.get("binaural_mid_side_loss_weight", 0.0)
+        ),
+        "binaural_mid_side_loss_type": str(
+            training_raw.get("binaural_mid_side_loss_type", "charbonnier")
+        ),
+        "binaural_mid_side_mid_weight": float(
+            training_raw.get("binaural_mid_side_mid_weight", 0.0)
+        ),
+        "binaural_mid_side_side_weight": float(
+            training_raw.get("binaural_mid_side_side_weight", 1.0)
+        ),
+        "binaural_mid_side_charbonnier_eps": float(
+            training_raw.get("binaural_mid_side_charbonnier_eps", 1e-3)
         ),
         "binaural_loss_warmup_steps": int(
             training_raw.get("binaural_loss_warmup_steps", 0)

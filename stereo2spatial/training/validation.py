@@ -103,6 +103,12 @@ def _run_signal_validation(
                 mrstft_sc_weight=config.training.mrstft_sc_weight,
                 mrstft_log_mag_weight=config.training.mrstft_log_mag_weight,
                 mrstft_eps=config.training.mrstft_eps,
+                waveform_mse_loss_weight=config.training.waveform_mse_loss_weight,
+                waveform_l1_loss_weight=config.training.waveform_l1_loss_weight,
+                waveform_charbonnier_loss_weight=(
+                    config.training.waveform_charbonnier_loss_weight
+                ),
+                waveform_charbonnier_eps=config.training.waveform_charbonnier_eps,
                 perceptual_loss_weight=config.training.perceptual_loss_weight,
                 perceptual_sample_rate=config.data.sample_rate,
                 perceptual_n_fft=config.training.perceptual_n_fft,
@@ -118,6 +124,36 @@ def _run_signal_validation(
                 binaural_ild_loss_weight=config.training.binaural_ild_loss_weight,
                 binaural_ipd_loss_weight=config.training.binaural_ipd_loss_weight,
                 binaural_ccf_loss_weight=config.training.binaural_ccf_loss_weight,
+                binaural_frame_ild_loss_weight=(
+                    config.training.binaural_frame_ild_loss_weight
+                ),
+                binaural_frame_ild_frame_size=(
+                    config.training.binaural_frame_ild_frame_size
+                ),
+                binaural_frame_ild_hop_size=(
+                    config.training.binaural_frame_ild_hop_size
+                ),
+                binaural_frame_ild_silence_threshold=(
+                    config.training.binaural_frame_ild_silence_threshold
+                ),
+                binaural_frame_ild_max_weight=(
+                    config.training.binaural_frame_ild_max_weight
+                ),
+                binaural_mid_side_loss_weight=(
+                    config.training.binaural_mid_side_loss_weight
+                ),
+                binaural_mid_side_loss_type=(
+                    config.training.binaural_mid_side_loss_type
+                ),
+                binaural_mid_side_mid_weight=(
+                    config.training.binaural_mid_side_mid_weight
+                ),
+                binaural_mid_side_side_weight=(
+                    config.training.binaural_mid_side_side_weight
+                ),
+                binaural_mid_side_charbonnier_eps=(
+                    config.training.binaural_mid_side_charbonnier_eps
+                ),
                 binaural_loss_warmup_steps=config.training.binaural_loss_warmup_steps,
                 binaural_sample_rate=config.data.sample_rate,
                 binaural_loss_eps=config.training.binaural_loss_eps,
