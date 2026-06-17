@@ -213,8 +213,9 @@ Validation controls:
 - `validation_generation_input_path`
 - `validation_generation_output_path`
 - `validation_generation_solver`: inference solver for generated previews
-  (`heun`, `euler`, `unipc`, `res6s`, `res_6s`, `dopri5`, `midpoint`, `rk4`,
-  `explicit_adams`, `implicit_adams`, or `auto`)
+  (`heun`, `euler`, `unipc`, `res6s`, `res_6s`, `dopri5`, `midpoint`,
+  `midpoint_rk2`, `midpoint-rk2`, `rk2`, `rk4`, `explicit_adams`,
+  `implicit_adams`, or `auto`)
 - `validation_generation_solver_steps`
 - `validation_generation_solver_rtol` / `validation_generation_solver_atol`
 - `validation_generation_chunk_seconds`: null uses `data.segment_seconds`

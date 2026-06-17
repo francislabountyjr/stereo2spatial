@@ -6,34 +6,45 @@ data:
     - dataset_root: dataset/stereo2spatial_headphone_virtualizer
       manifest_path: dataset/stereo2spatial_headphone_virtualizer/manifest.jsonl
   sample_artifact_mode: flac
+  sample_exclusion_path:
   segment_seconds: 10.0
   sequence_seconds: 34.0
   stride_seconds: 8.0
   sample_rate: 48000
+  training_sample_rate:
   mono_probability: 0.0
   downmix_probability: 0.0
-  cache_size: 2
+  cache_size: 4
   materialize_cached_signals: true
   shuffle_segments_within_epoch: true
   shuffle_segments_within_song: true
-  batch_mode: standard
+  batch_mode: song_local
   batch_size: 4
-  num_workers: 12
-  prefetch_factor: 2
+  num_workers: 16
+  prefetch_factor: 3
   pin_memory: true
   persistent_workers: false
   drop_last: true
   amplitude_lift_enabled: true
+  amplitude_lift_mode: wavflow
   amplitude_lift_reference: source
   amplitude_lift_target_rms: 0.33
   amplitude_lift_scale: 3.0
+  amplitude_lift_clip_value: null
+  amplitude_lift_gain_power: 1.0
+  amplitude_lift_gain_min_value: null
+  amplitude_lift_waveform_clamp: true
+  amplitude_lift_peak_limit: 4.0
+  amplitude_lift_peak_rescale_min_rms: 0.00001
+  amplitude_lift_output_lufs: -23.0
   amplitude_lift_eps: 1.0e-8
+  min_source_rms: null
   source_resample_augmentation:
     enabled: true
     probability: 0.15
     rates: [44100]
   source_codec_augmentation:
-    enabled: true
+    enabled: false
     probability: 0.20
     start_step: 50000
     full_strength_step: 150000
@@ -56,28 +67,33 @@ data:
 model:
   target_channels: 2
   cond_channels: 2
-  patch_size: 1024
-  hidden_dim: 512
-  num_layers: 8
-  num_heads: 8
+  patch_size: 200
+  hidden_dim: 896
+  num_layers: 12
+  num_heads: 14
   mlp_ratio: 4.0
   dropout: 0.0
-  timestep_embed_dim: 512
+  timestep_embed_dim: 896
   timestep_scale: 1000.0
   max_period: 10000.0
-  num_memory_tokens: 8
+  num_memory_tokens: 32
   mix_style_dim: 10
-  waveform_level_depth: 2
+  amplitude_gain_conditioning: false
+  waveform_level_depth: 0
   waveform_micro_patch_size: 8
   waveform_hidden_dim: 16
   waveform_num_heads: 8
   waveform_mlp_ratio: 2.0
+  final_output_kernel_size: 7
+  final_output_zero_init: true
+  rope_enabled: true
+  rope_theta: 10000.0
   activation_checkpointing: false
 
 training:
-  max_steps: 400000
-  grad_accum_steps: 4
-  mixed_precision: fp16
+  max_steps: 600000
+  grad_accum_steps: 2
+  mixed_precision: bf16
   compile_model: true
   compile_mode: max-autotune-no-cudagraphs
   resume_from_checkpoint: null
@@ -112,10 +128,11 @@ training:
   mrstft_sc_weight: 1.0
   mrstft_log_mag_weight: 1.0
   mrstft_eps: 1.0e-7
-  waveform_mse_loss_weight: 1.0
+  waveform_mse_loss_weight: 0.1
   waveform_l1_loss_weight: 0.0
-  waveform_charbonnier_loss_weight: 0.0
+  waveform_charbonnier_loss_weight: 0.9
   waveform_charbonnier_eps: 1.0e-3
+  x_pred_v_loss_weight: 0.001
   perceptual_loss_weight: 0.03
   perceptual_n_fft: 1024
   perceptual_hop_length: 256
@@ -130,17 +147,17 @@ training:
   binaural_ild_loss_weight: 0.0
   binaural_ipd_loss_weight: 0.0
   binaural_ccf_loss_weight: 0.0
-  binaural_frame_ild_loss_weight: 0.0
+  binaural_frame_ild_loss_weight: 0.005
   binaural_frame_ild_frame_size: 2048
   binaural_frame_ild_hop_size: 1024
   binaural_frame_ild_silence_threshold: 1.0e-4
   binaural_frame_ild_max_weight: 4.0
-  binaural_mid_side_loss_weight: 0.0
+  binaural_mid_side_loss_weight: 0.02
   binaural_mid_side_loss_type: charbonnier
-  binaural_mid_side_mid_weight: 0.0
+  binaural_mid_side_mid_weight: 0.1
   binaural_mid_side_side_weight: 1.0
   binaural_mid_side_charbonnier_eps: 1.0e-3
-  binaural_loss_warmup_steps: 20000
+  binaural_loss_warmup_steps: 40000
   binaural_loss_eps: 1.0e-7
   scheduled_sampling_max_step_offset: 0
   scheduled_sampling_probability: 0.0
@@ -169,6 +186,8 @@ training:
   flow_schedule_base_shift: 0.5
   flow_schedule_max_shift: 1.15
   flow_loss_weighting: none
+  flow_one_step: false
+  flow_one_step_input: cond
   use_ema: true
   ema_decay: 0.999
   ema_device: accelerator
@@ -183,7 +202,7 @@ training:
   validation_generation_input_path: validation
   validation_generation_output_path: runs/train_headphone_virtualizer/validation_generations
   validation_generation_solver: res6s
-  validation_generation_solver_steps: 10
+  validation_generation_solver_steps: 4
   validation_generation_solver_rtol: 1.0e-5
   validation_generation_solver_atol: 1.0e-5
   validation_generation_chunk_seconds: 10.0
@@ -194,7 +213,7 @@ optimizer:
   lr: 1.0e-4
   weight_decay: 0.01
   beta1: 0.9
-  beta2: 0.99
+  beta2: 0.95
   eps: 1.0e-8
   adamw_fused: true
   adamw_foreach: false

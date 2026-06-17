@@ -6,10 +6,12 @@ data:
     - dataset_root: dataset/stereo2spatial_headphone_virtualizer
       manifest_path: dataset/stereo2spatial_headphone_virtualizer/manifest.jsonl
   sample_artifact_mode: flac
+  sample_exclusion_path:
   segment_seconds: 12.0
   sequence_seconds: 36.0
   stride_seconds: 8.0
   sample_rate: 48000
+  training_sample_rate:
   mono_probability: 0.0
   downmix_probability: 0.0
   cache_size: 16
@@ -21,10 +23,17 @@ data:
   persistent_workers: true
   drop_last: true
   amplitude_lift_enabled: true
+  amplitude_lift_mode: wavflow
   amplitude_lift_reference: source
   amplitude_lift_target_rms: 0.33
   amplitude_lift_scale: 3.0
   amplitude_lift_clip_value: 4.0
+  amplitude_lift_gain_power: 1.0
+  amplitude_lift_gain_min_value:
+  amplitude_lift_waveform_clamp: true
+  amplitude_lift_peak_limit: 1.0
+  amplitude_lift_peak_rescale_min_rms: 0.3
+  amplitude_lift_output_lufs: -23.0
   amplitude_lift_eps: 1.0e-8
   source_resample_augmentation:
     enabled: true
@@ -65,11 +74,14 @@ model:
   max_period: 10000.0
   num_memory_tokens: 8
   mix_style_dim: 10
+  amplitude_gain_conditioning: true
   waveform_level_depth: 2
   waveform_micro_patch_size: 16
   waveform_hidden_dim: 16
   waveform_num_heads: 8
   waveform_mlp_ratio: 2.0
+  rope_enabled: true
+  rope_theta: 10000.0
   activation_checkpointing: false
 
 training:
@@ -113,6 +125,7 @@ training:
   waveform_l1_loss_weight: 0.0
   waveform_charbonnier_loss_weight: 0.0
   waveform_charbonnier_eps: 1.0e-3
+  x_pred_v_loss_weight: 0.0
   perceptual_loss_weight: 0.03
   perceptual_n_fft: 1024
   perceptual_hop_length: 256
