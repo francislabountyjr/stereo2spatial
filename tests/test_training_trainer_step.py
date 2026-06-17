@@ -81,6 +81,7 @@ def _build_settings() -> TrainerRuntimeSettings:
             waveform_l1_loss_weight=0.0,
             waveform_charbonnier_loss_weight=0.0,
             waveform_charbonnier_eps=1e-3,
+            x_pred_v_loss_weight=0.0,
             perceptual_loss_weight=0.0,
             perceptual_sample_rate=48000,
             perceptual_n_fft=1024,
@@ -128,10 +129,12 @@ def test_run_training_step_skips_second_backward_for_full_song_tbptt(
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     accelerator = _FakeAccelerator()
 
-    def _tbptt_loss(**kwargs: Any) -> tuple[torch.Tensor, int, int, None]:
+    def _tbptt_loss(
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, int, int, None, dict[str, torch.Tensor]]:
         loss = kwargs["model"].weight.square().sum()
         kwargs["accelerator"].backward(loss)
-        return loss.detach(), 8, 2, None
+        return loss.detach(), 8, 2, None, {"mse": loss.detach()}
 
     monkeypatch.setattr(
         trainer_step_module,
@@ -166,9 +169,11 @@ def test_run_training_step_backprops_loss_when_tbptt_disabled(
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     accelerator = _FakeAccelerator()
 
-    def _full_song_loss(**kwargs: Any) -> tuple[torch.Tensor, int, int, None]:
+    def _full_song_loss(
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, int, int, None, dict[str, torch.Tensor]]:
         loss = kwargs["model"].weight.square().sum()
-        return loss, 8, 2, None
+        return loss, 8, 2, None, {"mse": loss.detach()}
 
     monkeypatch.setattr(
         trainer_step_module,
@@ -203,8 +208,11 @@ def test_run_training_step_skips_nonfinite_loss(
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     accelerator = _FakeAccelerator()
 
-    def _batch_loss(**_kwargs: Any) -> tuple[torch.Tensor, int, int, None]:
-        return model.weight * torch.tensor(float("nan")), 8, 1, None
+    def _batch_loss(
+        **_kwargs: Any,
+    ) -> tuple[torch.Tensor, int, int, None, dict[str, torch.Tensor]]:
+        loss = model.weight * torch.tensor(float("nan"))
+        return loss, 8, 1, None, {"mse": loss.detach()}
 
     monkeypatch.setattr(
         trainer_step_module,

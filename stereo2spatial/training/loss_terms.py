@@ -14,6 +14,21 @@ from stereo2spatial.common.channel_layouts import (
 DEFAULT_DOWNMIX_CHANNEL_ORDER_7_1_4 = CHANNEL_ORDER_7_1_4
 
 
+def _accumulate_loss_metric(
+    loss_metrics: dict[str, torch.Tensor] | None,
+    name: str,
+    value: torch.Tensor,
+) -> None:
+    """Accumulate a detached scalar loss metric when reporting is requested."""
+    if loss_metrics is None:
+        return
+    metric = value.detach().float()
+    if name in loss_metrics:
+        loss_metrics[name] = loss_metrics[name] + metric
+    else:
+        loss_metrics[name] = metric
+
+
 def _compute_loss_weighted(
     prediction: torch.Tensor,  # [B,C,D,T]
     target_clean: torch.Tensor,  # [B,C,D,T]
@@ -84,6 +99,7 @@ def _masked_waveform_reconstruction_loss(
     charbonnier_eps: float = 1e-3,
     sample_loss_weight: torch.Tensor | None = None,
     element_weight: torch.Tensor | float | None = None,
+    loss_metrics: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Compute a weighted sum of masked waveform reconstruction losses."""
     pred_f = prediction.float()
@@ -113,23 +129,27 @@ def _masked_waveform_reconstruction_loss(
         return loss
 
     if float(mse_weight) > 0.0:
-        total = total + float(mse_weight) * _reduce_masked_reconstruction_loss(
+        component = float(mse_weight) * _reduce_masked_reconstruction_loss(
             loss=apply_extra_weights((pred_f - target_f).pow(2)),
             prediction=prediction,
             valid_mask=valid_mask,
             frame_weight=frame_weight,
         )
+        total = total + component
+        _accumulate_loss_metric(loss_metrics, "mse", component)
         used = True
     if float(l1_weight) > 0.0:
-        total = total + float(l1_weight) * _reduce_masked_reconstruction_loss(
+        component = float(l1_weight) * _reduce_masked_reconstruction_loss(
             loss=apply_extra_weights((pred_f - target_f).abs()),
             prediction=prediction,
             valid_mask=valid_mask,
             frame_weight=frame_weight,
         )
+        total = total + component
+        _accumulate_loss_metric(loss_metrics, "l1", component)
         used = True
     if float(charbonnier_weight) > 0.0:
-        total = total + float(charbonnier_weight) * _reduce_masked_reconstruction_loss(
+        component = float(charbonnier_weight) * _reduce_masked_reconstruction_loss(
             loss=apply_extra_weights(
                 _charbonnier_loss(
                     pred_f,
@@ -142,6 +162,8 @@ def _masked_waveform_reconstruction_loss(
             valid_mask=valid_mask,
             frame_weight=frame_weight,
         )
+        total = total + component
+        _accumulate_loss_metric(loss_metrics, "charb", component)
         used = True
 
     if not used:
@@ -151,6 +173,67 @@ def _masked_waveform_reconstruction_loss(
             "waveform_charbonnier_loss_weight)."
         )
     return total
+
+
+def _masked_x_pred_v_loss(
+    *,
+    prediction: torch.Tensor,
+    target_clean: torch.Tensor,
+    noisy_state: torch.Tensor,
+    t: torch.Tensor,
+    valid_mask: torch.Tensor,
+    frame_weight: torch.Tensor,
+    weight: float,
+    sample_loss_weight: torch.Tensor | None = None,
+    element_weight: torch.Tensor | float | None = None,
+    loss_metrics: dict[str, torch.Tensor] | None = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Compute WavFlow-style x-prediction velocity loss for clean predictions."""
+    weight_f = float(weight)
+    if weight_f <= 0.0:
+        return prediction.float().new_zeros(())
+    pred_f = prediction.float()
+    target_f = target_clean.float().to(device=pred_f.device)
+    state_f = noisy_state.float().to(device=pred_f.device)
+    if pred_f.shape != target_f.shape or pred_f.shape != state_f.shape:
+        raise ValueError(
+            "prediction, target_clean, and noisy_state must have the same shape "
+            f"(got {tuple(pred_f.shape)}, {tuple(target_f.shape)}, {tuple(state_f.shape)})"
+        )
+    if t.dim() != 1 or t.shape[0] != pred_f.shape[0]:
+        raise ValueError(f"t must be [B] matching prediction batch, got {tuple(t.shape)}")
+
+    one_minus_t = (1.0 - t.float().to(device=pred_f.device)).clamp_min(float(eps))
+    one_minus_t = one_minus_t[:, None, None, None]
+    pred_v = (pred_f - state_f) / one_minus_t
+    target_v = (target_f - state_f) / one_minus_t
+    loss = (pred_v - target_v).pow(2)
+
+    if element_weight is not None:
+        loss = loss * torch.as_tensor(
+            element_weight,
+            dtype=loss.dtype,
+            device=loss.device,
+        )
+    if sample_loss_weight is not None:
+        if sample_loss_weight.dim() != 1 or sample_loss_weight.shape[0] != pred_f.shape[0]:
+            raise ValueError(
+                "sample_loss_weight must be shape [B] matching prediction batch size."
+            )
+        loss = loss * sample_loss_weight[:, None, None, None].to(
+            dtype=loss.dtype,
+            device=loss.device,
+        )
+
+    component = weight_f * _reduce_masked_reconstruction_loss(
+        loss=loss,
+        prediction=prediction,
+        valid_mask=valid_mask,
+        frame_weight=frame_weight,
+    )
+    _accumulate_loss_metric(loss_metrics, "xpv", component)
+    return component
 
 
 def _downmix_to_stereo(
@@ -391,6 +474,7 @@ def _binaural_stft_cue_loss(
     ipd_weight: float = 0.0,
     eps: float = 1e-7,
     energy_weight_power: float = 0.3,
+    loss_metrics: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Compare binaural ILD/IPD cues for direct two-channel headphone targets."""
     if float(ild_weight) <= 0.0 and float(ipd_weight) <= 0.0:
@@ -412,6 +496,8 @@ def _binaural_stft_cue_loss(
     pred_audio = _unpatch_binaural_signal_to_audio(prediction_x1, mask_dt=mask_dt)
     target_audio = _unpatch_binaural_signal_to_audio(target_x1, mask_dt=mask_dt)
     total = pred_audio.new_zeros(())
+    ild_total = pred_audio.new_zeros(())
+    ipd_total = pred_audio.new_zeros(())
     used = 0
     eps_f = float(max(eps, 1e-12))
 
@@ -470,10 +556,11 @@ def _binaural_stft_cue_loss(
             target_ild = torch.log(
                 target_stft[:, 0].abs().clamp_min(eps_f)
             ) - torch.log(target_stft[:, 1].abs().clamp_min(eps_f))
-            resolution_loss = (
-                resolution_loss
-                + float(ild_weight) * ((pred_ild - target_ild).abs() * weight).mean()
-            )
+            ild_component = float(ild_weight) * (
+                (pred_ild - target_ild).abs() * weight
+            ).mean()
+            resolution_loss = resolution_loss + ild_component
+            ild_total = ild_total + ild_component
 
         if float(ipd_weight) > 0.0:
             pred_cross = pred_stft[:, 0] * pred_stft[:, 1].conj()
@@ -481,12 +568,19 @@ def _binaural_stft_cue_loss(
             pred_unit = pred_cross / pred_cross.abs().clamp_min(eps_f)
             target_unit = target_cross / target_cross.abs().clamp_min(eps_f)
             ipd = (1.0 - (pred_unit * target_unit.conj()).real) * weight
-            resolution_loss = resolution_loss + float(ipd_weight) * ipd.mean()
+            ipd_component = float(ipd_weight) * ipd.mean()
+            resolution_loss = resolution_loss + ipd_component
+            ipd_total = ipd_total + ipd_component
 
         total = total + resolution_loss
         used += 1
 
-    return total / float(max(used, 1))
+    denom = float(max(used, 1))
+    if float(ild_weight) > 0.0:
+        _accumulate_loss_metric(loss_metrics, "b_ild", ild_total / denom)
+    if float(ipd_weight) > 0.0:
+        _accumulate_loss_metric(loss_metrics, "b_ipd", ipd_total / denom)
+    return total / denom
 
 
 def _normalized_binaural_frames(
@@ -719,6 +813,7 @@ def _binaural_cue_loss(
     mid_side_side_weight: float = 1.0,
     mid_side_charbonnier_eps: float = 1e-3,
     eps: float = 1e-7,
+    loss_metrics: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Aggregate optional binaural cue losses for direct headphone targets."""
     if prediction_x1.shape[1] != 2:
@@ -735,17 +830,20 @@ def _binaural_cue_loss(
             ild_weight=float(ild_weight),
             ipd_weight=float(ipd_weight),
             eps=float(eps),
+            loss_metrics=loss_metrics,
         )
     if float(ccf_weight) > 0.0:
-        total = total + float(ccf_weight) * _binaural_ccf_loss(
+        component = float(ccf_weight) * _binaural_ccf_loss(
             prediction_x1=prediction_x1,
             target_x1=target_x1,
             mask_dt=mask_dt,
             sample_rate=int(sample_rate),
             eps=float(eps),
         )
+        total = total + component
+        _accumulate_loss_metric(loss_metrics, "b_ccf", component)
     if float(frame_ild_weight) > 0.0:
-        total = total + float(frame_ild_weight) * _frame_rms_ild_loss(
+        component = float(frame_ild_weight) * _frame_rms_ild_loss(
             prediction_x1=prediction_x1,
             target_x1=target_x1,
             mask_dt=mask_dt,
@@ -755,8 +853,10 @@ def _binaural_cue_loss(
             silence_threshold=float(frame_ild_silence_threshold),
             max_weight=float(frame_ild_max_weight),
         )
+        total = total + component
+        _accumulate_loss_metric(loss_metrics, "b_fild", component)
     if float(mid_side_weight) > 0.0:
-        total = total + float(mid_side_weight) * _mid_side_loss(
+        component = float(mid_side_weight) * _mid_side_loss(
             prediction_x1=prediction_x1,
             target_x1=target_x1,
             mask_dt=mask_dt,
@@ -765,6 +865,8 @@ def _binaural_cue_loss(
             mid_weight=float(mid_side_mid_weight),
             side_weight=float(mid_side_side_weight),
         )
+        total = total + component
+        _accumulate_loss_metric(loss_metrics, "b_ms", component)
     return total
 
 

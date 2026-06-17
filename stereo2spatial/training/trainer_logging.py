@@ -98,6 +98,7 @@ def log_training_setup(
         "  - waveform_charbonnier_loss_weight="
         f"{settings.waveform_charbonnier_loss_weight}"
     )
+    print(f"  - x_pred_v_loss_weight={settings.x_pred_v_loss_weight}")
     print(f"  - mrstft_loss_weight={settings.mrstft_loss_weight}")
     print(f"  - perceptual_loss_weight={settings.perceptual_loss_weight}")
     print(f"  - binaural_ild_loss_weight={settings.binaural_ild_loss_weight}")
@@ -137,10 +138,21 @@ def log_training_setup(
     )
     print(f"  - amplitude_lift_enabled={config.data.amplitude_lift_enabled}")
     if config.data.amplitude_lift_enabled:
+        print(f"  - amplitude_lift_mode={config.data.amplitude_lift_mode}")
         print(f"  - amplitude_lift_reference={config.data.amplitude_lift_reference}")
         print(f"  - amplitude_lift_target_rms={config.data.amplitude_lift_target_rms}")
         print(f"  - amplitude_lift_scale={config.data.amplitude_lift_scale}")
         print(f"  - amplitude_lift_clip_value={config.data.amplitude_lift_clip_value}")
+        print(
+            "  - amplitude_lift_waveform_clamp="
+            f"{config.data.amplitude_lift_waveform_clamp}"
+        )
+        print(f"  - amplitude_lift_peak_limit={config.data.amplitude_lift_peak_limit}")
+        print(
+            "  - amplitude_lift_peak_rescale_min_rms="
+            f"{config.data.amplitude_lift_peak_rescale_min_rms}"
+        )
+        print(f"  - amplitude_lift_output_lufs={config.data.amplitude_lift_output_lufs}")
     print(f"  - batch_size_per_process={config.data.batch_size}")
     print(f"  - dataloader_batch_mode={config.data.batch_mode}")
     print(f"  - materialize_cached_signals={config.data.materialize_cached_signals}")

@@ -195,6 +195,20 @@ def validate_training_schedule(config: TrainConfig, sequence_mode: str) -> None:
             "training.flow_loss_weighting must be one of: none, sigma_sqrt, cosmap"
         )
 
+    flow_one_step_input = str(
+        getattr(config.training, "flow_one_step_input", "zeros")
+    ).strip().lower()
+    if flow_one_step_input not in {"zeros", "cond"}:
+        raise ValueError(
+            "training.flow_one_step_input must be one of: zeros, cond"
+        )
+    if flow_one_step_input == "cond" and getattr(config.training, "flow_one_step", False):
+        if config.model.target_channels != config.model.cond_channels:
+            raise ValueError(
+                "training.flow_one_step_input=cond requires "
+                "model.target_channels == model.cond_channels"
+            )
+
     if not isinstance(config.training.use_ema, bool):
         raise ValueError("training.use_ema must be true/false")
     ema_decay = float(config.training.ema_decay)
@@ -302,13 +316,18 @@ def validate_training_aux_losses(config: TrainConfig) -> None:
         config.training.waveform_charbonnier_eps,
         "training.waveform_charbonnier_eps",
     )
+    require_non_negative(
+        config.training.x_pred_v_loss_weight,
+        "training.x_pred_v_loss_weight",
+    )
     if (
         float(config.training.waveform_mse_loss_weight)
         + float(config.training.waveform_l1_loss_weight)
         + float(config.training.waveform_charbonnier_loss_weight)
+        + float(config.training.x_pred_v_loss_weight)
     ) <= 0.0:
         raise ValueError(
-            "At least one waveform reconstruction loss weight must be > 0"
+            "At least one waveform/x-prediction loss weight must be > 0"
         )
     stft_lists = (
         config.training.mrstft_fft_sizes,

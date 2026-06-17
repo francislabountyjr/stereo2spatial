@@ -8,6 +8,7 @@ import torch
 from accelerate import Accelerator
 
 from .loss_terms import (
+    _accumulate_loss_metric,
     _binaural_cue_loss,
     _channel_correlation_l1_loss,
     _channel_routing_kl_loss,
@@ -93,6 +94,7 @@ def _apply_aux_losses_and_collect(
     gan_real_chunks: list[torch.Tensor] | None,
     gan_fake_chunks: list[torch.Tensor] | None,
     gan_mask_chunks: list[torch.Tensor] | None,
+    loss_metrics: dict[str, torch.Tensor] | None,
 ) -> torch.Tensor:
     """Apply aux signal losses and optionally collect GAN supervision tensors."""
     vm4 = vm_w[:, None, None, :].to(dtype=pred.dtype, device=pred.device)
@@ -111,7 +113,9 @@ def _apply_aux_losses_and_collect(
             temperature=float(routing_kl_temperature),
             eps=float(routing_kl_eps),
         )
-        window_loss = window_loss + float(routing_kl_weight) * l_route
+        component = float(routing_kl_weight) * l_route
+        window_loss = window_loss + component
+        _accumulate_loss_metric(loss_metrics, "route", component)
 
     if float(corr_weight) > 0.0:
         l_corr = _channel_correlation_l1_loss(
@@ -122,7 +126,9 @@ def _apply_aux_losses_and_collect(
             offdiag_only=bool(corr_offdiag_only),
             use_correlation=bool(corr_use_correlation),
         )
-        window_loss = window_loss + float(corr_weight) * l_corr
+        component = float(corr_weight) * l_corr
+        window_loss = window_loss + component
+        _accumulate_loss_metric(loss_metrics, "corr", component)
 
     if float(downmix_consistency_weight) > 0.0:
         if target_downmix_w is None:
@@ -137,7 +143,9 @@ def _apply_aux_losses_and_collect(
             channel_order=downmix_channel_order,
             loss_type=downmix_consistency_loss,
         )
-        window_loss = window_loss + float(downmix_consistency_weight) * l_downmix
+        component = float(downmix_consistency_weight) * l_downmix
+        window_loss = window_loss + component
+        _accumulate_loss_metric(loss_metrics, "downmix", component)
 
     if float(mrstft_loss_weight) > 0.0:
         l_mrstft = _multi_resolution_stft_loss(
@@ -151,7 +159,9 @@ def _apply_aux_losses_and_collect(
             log_magnitude_weight=mrstft_log_mag_weight,
             eps=mrstft_eps,
         )
-        window_loss = window_loss + float(mrstft_loss_weight) * l_mrstft
+        component = float(mrstft_loss_weight) * l_mrstft
+        window_loss = window_loss + component
+        _accumulate_loss_metric(loss_metrics, "mrstft", component)
 
     if float(perceptual_loss_weight) > 0.0:
         l_perceptual = _stereo_log_mel_perceptual_loss(
@@ -176,7 +186,9 @@ def _apply_aux_losses_and_collect(
             band_high_hz=float(perceptual_band_high_hz),
             eps=float(perceptual_eps),
         )
-        window_loss = window_loss + float(perceptual_loss_weight) * l_perceptual
+        component = float(perceptual_loss_weight) * l_perceptual
+        window_loss = window_loss + component
+        _accumulate_loss_metric(loss_metrics, "perc", component)
 
     if (
         float(binaural_ild_loss_weight) > 0.0
@@ -216,6 +228,7 @@ def _apply_aux_losses_and_collect(
                 mid_side_side_weight=float(binaural_mid_side_side_weight),
                 mid_side_charbonnier_eps=float(binaural_mid_side_charbonnier_eps),
                 eps=float(binaural_loss_eps),
+                loss_metrics=loss_metrics,
             )
             window_loss = window_loss + l_binaural
 
@@ -297,6 +310,7 @@ def _compute_full_song_flow_matching_loss(
     waveform_l1_loss_weight: float = 0.0,
     waveform_charbonnier_loss_weight: float = 0.0,
     waveform_charbonnier_eps: float = 1e-3,
+    x_pred_v_loss_weight: float = 0.0,
     perceptual_loss_weight: float = 0.0,
     perceptual_sample_rate: int = 48000,
     perceptual_n_fft: int = 1024,
@@ -325,12 +339,19 @@ def _compute_full_song_flow_matching_loss(
     binaural_loss_warmup_steps: int = 0,
     binaural_sample_rate: int = 48000,
     binaural_loss_eps: float = 1e-7,
-) -> tuple[torch.Tensor, int, int, dict[str, torch.Tensor] | None]:
+) -> tuple[
+    torch.Tensor,
+    int,
+    int,
+    dict[str, torch.Tensor] | None,
+    dict[str, torch.Tensor],
+]:
     """Compute flow-matching loss over full songs with optional TBPTT flushing."""
     z1 = batch["target_signal"]  # [B,C,P,T]
     z_cond = batch["cond_signal"]  # [B,Cc,P,T]
     target_downmix = batch.get("target_downmix_signal")  # [B,2,P,T]
     valid_mask = batch["valid_mask"]  # [B,T]
+    amplitude_gain = batch.get("amplitude_lift_log_gain")  # [B,1] or None
     mix_style, mix_style_mask = apply_mix_style_dropout(
         mix_style=batch.get("mix_style"),
         training_config=scheduled_sampling_config,
@@ -362,6 +383,7 @@ def _compute_full_song_flow_matching_loss(
             z0=inputs.z0,
             mix_style=mix_style,
             mix_style_mask=mix_style_mask,
+            amplitude_gain=amplitude_gain,
             training_config=scheduled_sampling_config,
             global_step=global_step,
             window_frames=window_frames,
@@ -427,6 +449,7 @@ def _compute_full_song_flow_matching_loss(
         total_loss: torch.Tensor = torch.zeros(
             (), device=inputs.z1.device, dtype=torch.float32
         )
+        loss_metrics: dict[str, torch.Tensor] = {}
         for idx, start in enumerate(starts):
             end = min(start + window_frames, t_eff)
             zt_w, zc_w, vm_w, z1_w = slice_and_pad_window(
@@ -471,6 +494,7 @@ def _compute_full_song_flow_matching_loss(
                 detach_memory=detach_memory,
                 mix_style=mix_style,
                 mix_style_mask=mix_style_mask,
+                amplitude_gain=amplitude_gain,
             )
 
             clean_pred_w: torch.Tensor | None = None
@@ -506,6 +530,8 @@ def _compute_full_song_flow_matching_loss(
             loss_fm_w = compute_flow_matching_window_loss(
                 prediction=pred,
                 target_clean=z1_w.to(dtype=pred.dtype, device=pred.device),
+                noisy_state=zt_w.to(dtype=pred.dtype, device=pred.device),
+                t=inputs.t,
                 valid_mask=vm_w,
                 frame_weight=weight,
                 sample_loss_weight=inputs.loss_weight,
@@ -513,6 +539,8 @@ def _compute_full_song_flow_matching_loss(
                 waveform_l1_loss_weight=waveform_l1_loss_weight,
                 waveform_charbonnier_loss_weight=waveform_charbonnier_loss_weight,
                 waveform_charbonnier_eps=waveform_charbonnier_eps,
+                x_pred_v_loss_weight=x_pred_v_loss_weight,
+                loss_metrics=loss_metrics,
                 reflex_enabled=reflexflow.enabled,
                 reflex_clean_pred=clean_pred_w,
                 reflex_biased_pred=biased_pred_w,
@@ -588,11 +616,15 @@ def _compute_full_song_flow_matching_loss(
                     gan_real_chunks=gan_real_chunks,
                     gan_fake_chunks=gan_fake_chunks,
                     gan_mask_chunks=gan_mask_chunks,
+                    loss_metrics=loss_metrics,
                 )
 
             total_loss = total_loss + window_loss
 
         avg_loss = total_loss / num_windows
+        averaged_metrics = {
+            name: value / float(num_windows) for name, value in loss_metrics.items()
+        }
         gan_aux = _finalize_gan_aux(
             collect_gan_aux=collect_gan_aux,
             gan_cond_chunks=gan_cond_chunks,
@@ -600,11 +632,12 @@ def _compute_full_song_flow_matching_loss(
             gan_fake_chunks=gan_fake_chunks,
             gan_mask_chunks=gan_mask_chunks,
         )
-        return avg_loss, t_eff, num_windows, gan_aux
+        return avg_loss, t_eff, num_windows, gan_aux, averaged_metrics
 
     # TBPTT mode: run backward in chunks of windows to keep graph bounded.
     loss_chunk = torch.zeros((), device=inputs.z1.device, dtype=torch.float32)
     windows_in_chunk = 0
+    loss_metrics: dict[str, torch.Tensor] = {}
     for idx, start in enumerate(starts):
         end = min(start + window_frames, t_eff)
         zt_w, zc_w, vm_w, z1_w = slice_and_pad_window(
@@ -673,6 +706,8 @@ def _compute_full_song_flow_matching_loss(
         loss_w = compute_flow_matching_window_loss(
             prediction=pred,
             target_clean=z1_w.to(dtype=pred.dtype, device=pred.device),
+            noisy_state=zt_w.to(dtype=pred.dtype, device=pred.device),
+            t=inputs.t,
             valid_mask=vm_w,
             frame_weight=weight,
             sample_loss_weight=inputs.loss_weight,
@@ -680,6 +715,8 @@ def _compute_full_song_flow_matching_loss(
             waveform_l1_loss_weight=waveform_l1_loss_weight,
             waveform_charbonnier_loss_weight=waveform_charbonnier_loss_weight,
             waveform_charbonnier_eps=waveform_charbonnier_eps,
+            x_pred_v_loss_weight=x_pred_v_loss_weight,
+            loss_metrics=loss_metrics,
             reflex_enabled=reflexflow.enabled,
             reflex_clean_pred=tbptt_clean_pred_w,
             reflex_biased_pred=tbptt_biased_pred_w,
@@ -703,4 +740,7 @@ def _compute_full_song_flow_matching_loss(
                 mem = mem.detach()
 
     avg_loss = total_loss_for_logging / float(num_windows)
-    return avg_loss, t_eff, num_windows, None
+    averaged_metrics = {
+        name: value / float(num_windows) for name, value in loss_metrics.items()
+    }
+    return avg_loss, t_eff, num_windows, None, averaged_metrics

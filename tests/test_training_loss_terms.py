@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import torch
 import pytest
+import torch
 
 from stereo2spatial.training.loss_terms import (
     _binaural_ccf_loss,
     _binaural_cue_loss,
     _binaural_stft_cue_loss,
-    _charbonnier_loss,
     _channel_correlation_l1_loss,
+    _charbonnier_loss,
     _downmix_consistency_loss,
     _downmix_to_stereo,
     _frame_rms_ild_loss,

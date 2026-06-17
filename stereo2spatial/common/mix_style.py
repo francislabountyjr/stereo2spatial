@@ -495,7 +495,6 @@ def _compute_stereo_binaural_mix_style_raw(
     mid_l, side_l = _mid_side_band_energy(fl_l, fr_l, rho_lr)
     total_m = (mid_m + side_m).clamp_min(_EPS)
     total_v = (mid_v + side_v).clamp_min(_EPS)
-    total_l = (mid_l + side_l).clamp_min(_EPS)
 
     intensity = torch.log(total_m + _EPS)
     p10 = torch.quantile(intensity, 0.10)

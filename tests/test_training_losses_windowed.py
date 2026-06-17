@@ -262,6 +262,33 @@ def test_compute_flow_matching_window_loss_supports_l1_and_charbonnier() -> None
     )
 
 
+def test_compute_flow_matching_window_loss_supports_x_pred_v_loss() -> None:
+    prediction = torch.tensor([[[[0.5, 0.0]]]], dtype=torch.float32)
+    target_clean = torch.tensor([[[[1.0, 0.0]]]], dtype=torch.float32)
+    noisy_state = torch.zeros_like(prediction)
+    valid_mask = torch.ones(1, 2, dtype=torch.bool)
+    frame_weight = torch.ones(2, dtype=torch.float32)
+
+    loss_metrics: dict[str, torch.Tensor] = {}
+    loss = compute_flow_matching_window_loss(
+        prediction=prediction,
+        target_clean=target_clean,
+        noisy_state=noisy_state,
+        t=torch.tensor([0.5], dtype=torch.float32),
+        valid_mask=valid_mask,
+        frame_weight=frame_weight,
+        waveform_mse_loss_weight=0.0,
+        waveform_l1_loss_weight=0.0,
+        waveform_charbonnier_loss_weight=0.0,
+        x_pred_v_loss_weight=2.0,
+        loss_metrics=loss_metrics,
+        reflex_enabled=False,
+    )
+
+    assert loss.item() == pytest.approx(1.0, abs=1e-7)
+    assert loss_metrics["xpv"].item() == pytest.approx(1.0, abs=1e-7)
+
+
 def test_compute_flow_matching_window_loss_reflex_adr_uses_biased_direction() -> None:
     prediction = torch.tensor([[[[1.0]]]], dtype=torch.float32)
     target_clean = torch.tensor([[[[1.0]]]], dtype=torch.float32)

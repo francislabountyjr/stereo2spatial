@@ -10,7 +10,7 @@ import torch
 from accelerate import Accelerator
 from torch.distributions import Beta
 
-from .loss_terms import _masked_waveform_reconstruction_loss
+from .loss_terms import _masked_waveform_reconstruction_loss, _masked_x_pred_v_loss
 from .windowing import _chunk_weight, _segment_starts
 
 WindowMetadata = dict[int, tuple[list[int], list[torch.Tensor]]]
@@ -213,16 +213,24 @@ def prepare_flow_matching_inputs(
     z_cond = z_cond * frame_mask
 
     batch_size = z1.shape[0]
-    sigma = _sample_flow_sigmas(
-        batch_size=batch_size,
-        device=z1.device,
-        dtype=torch.float32,
-        sequence_length=t_eff,
-        training_config=training_config,
-    )
-    t = (1.0 - sigma).clamp(0.0, 1.0)
-    z0 = torch.randn_like(z1)
-    zt = (1.0 - t[:, None, None, None]) * z0 + t[:, None, None, None] * z1
+    one_step = bool(getattr(training_config, "flow_one_step", False)) if training_config is not None else False
+    if one_step:
+        sigma = torch.zeros((batch_size,), device=z1.device, dtype=torch.float32)
+        t = torch.ones((batch_size,), device=z1.device, dtype=z1.dtype)
+        z0 = torch.zeros_like(z1)
+        one_step_input = str(getattr(training_config, "flow_one_step_input", "zeros")).strip().lower() if training_config is not None else "zeros"
+        zt = z_cond.clone() if one_step_input == "cond" else torch.zeros_like(z1)
+    else:
+        sigma = _sample_flow_sigmas(
+            batch_size=batch_size,
+            device=z1.device,
+            dtype=torch.float32,
+            sequence_length=t_eff,
+            training_config=training_config,
+        )
+        t = (1.0 - sigma).clamp(0.0, 1.0)
+        z0 = torch.randn_like(z1)
+        zt = (1.0 - t[:, None, None, None]) * z0 + t[:, None, None, None] * z1
     loss_weight = _compute_sd3_style_flow_loss_weight(
         sigmas=sigma.to(dtype=torch.float32),
         weighting_scheme=(
@@ -364,6 +372,8 @@ def compute_flow_matching_window_loss(
     *,
     prediction: torch.Tensor,  # clean x1 prediction [B,C,D,T]
     target_clean: torch.Tensor,  # clean x1 target [B,C,D,T]
+    noisy_state: torch.Tensor | None = None,  # current xt state [B,C,D,T]
+    t: torch.Tensor | None = None,  # [B]
     valid_mask: torch.Tensor,  # [B,T]
     frame_weight: torch.Tensor,  # [T]
     sample_loss_weight: torch.Tensor | None = None,  # [B]
@@ -371,6 +381,8 @@ def compute_flow_matching_window_loss(
     waveform_l1_loss_weight: float = 0.0,
     waveform_charbonnier_loss_weight: float = 0.0,
     waveform_charbonnier_eps: float = 1e-3,
+    x_pred_v_loss_weight: float = 0.0,
+    loss_metrics: dict[str, torch.Tensor] | None = None,
     reflex_enabled: bool = False,
     reflex_clean_pred: torch.Tensor | None = None,  # [B,C,D,T]
     reflex_biased_pred: torch.Tensor | None = None,  # [B,C,D,T]
@@ -407,18 +419,49 @@ def compute_flow_matching_window_loss(
             else:
                 element_weight = element_weight * float(reflex_beta2)
 
-    loss = _masked_waveform_reconstruction_loss(
-        prediction=prediction,
-        target_clean=target_clean,
-        valid_mask=valid_mask,
-        frame_weight=frame_weight,
-        mse_weight=float(waveform_mse_loss_weight),
-        l1_weight=float(waveform_l1_loss_weight),
-        charbonnier_weight=float(waveform_charbonnier_loss_weight),
-        charbonnier_eps=float(waveform_charbonnier_eps),
-        sample_loss_weight=sample_loss_weight,
-        element_weight=element_weight,
-    )
+    if (
+        float(waveform_mse_loss_weight)
+        + float(waveform_l1_loss_weight)
+        + float(waveform_charbonnier_loss_weight)
+        + float(x_pred_v_loss_weight)
+    ) <= 0.0:
+        raise ValueError("At least one waveform/x-prediction loss weight must be > 0")
+
+    if (
+        float(waveform_mse_loss_weight)
+        + float(waveform_l1_loss_weight)
+        + float(waveform_charbonnier_loss_weight)
+    ) > 0.0:
+        loss = _masked_waveform_reconstruction_loss(
+            prediction=prediction,
+            target_clean=target_clean,
+            valid_mask=valid_mask,
+            frame_weight=frame_weight,
+            mse_weight=float(waveform_mse_loss_weight),
+            l1_weight=float(waveform_l1_loss_weight),
+            charbonnier_weight=float(waveform_charbonnier_loss_weight),
+            charbonnier_eps=float(waveform_charbonnier_eps),
+            sample_loss_weight=sample_loss_weight,
+            element_weight=element_weight,
+            loss_metrics=loss_metrics,
+        )
+    else:
+        loss = prediction.float().new_zeros(())
+    if float(x_pred_v_loss_weight) > 0.0:
+        if noisy_state is None or t is None:
+            raise ValueError("x_pred_v_loss_weight > 0 requires noisy_state and t")
+        loss = loss + _masked_x_pred_v_loss(
+            prediction=prediction,
+            target_clean=target_clean,
+            noisy_state=noisy_state,
+            t=t,
+            valid_mask=valid_mask,
+            frame_weight=frame_weight,
+            weight=float(x_pred_v_loss_weight),
+            sample_loss_weight=sample_loss_weight,
+            element_weight=element_weight,
+            loss_metrics=loss_metrics,
+        )
 
     if reflex_enabled and float(reflex_beta1) != 0.0:
         mask4 = valid_mask[:, None, None, :].to(dtype=pred_f.dtype, device=pred_f.device)
@@ -476,6 +519,7 @@ def forward_window(
     detach_memory: bool,
     mix_style: torch.Tensor | None = None,
     mix_style_mask: torch.Tensor | None = None,
+    amplitude_gain: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run one model forward with optional recurrent memory handling."""
     if mem is None:
@@ -484,6 +528,8 @@ def forward_window(
             kwargs["mix_style"] = mix_style
         if mix_style_mask is not None:
             kwargs["mix_style_mask"] = mix_style_mask
+        if amplitude_gain is not None:
+            kwargs["amplitude_gain"] = amplitude_gain
         pred = model(**kwargs)
         return pred, None
 
@@ -499,6 +545,8 @@ def forward_window(
         kwargs["mix_style"] = mix_style
     if mix_style_mask is not None:
         kwargs["mix_style_mask"] = mix_style_mask
+    if amplitude_gain is not None:
+        kwargs["amplitude_gain"] = amplitude_gain
     pred, mem = model(**kwargs)
     if detach_memory:
         mem = mem.detach()

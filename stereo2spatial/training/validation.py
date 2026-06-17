@@ -28,12 +28,15 @@ def _build_validation_dataset(
             "Validation dataset root/path are required when run_validation is enabled."
         )
 
+    effective_sample_rate = int(
+        getattr(config.data, "training_sample_rate", None) or config.data.sample_rate
+    )
     return WaveformSongDataset(
         dataset_root=validation_dataset_root,
         manifest_path=validation_dataset_path,
         sample_artifact_mode=config.data.sample_artifact_mode,
         segment_seconds=config.data.segment_seconds,
-        patch_fps=float(config.data.sample_rate) / float(config.model.patch_size),
+        patch_fps=float(effective_sample_rate) / float(config.model.patch_size),
         patch_size=config.model.patch_size,
         mono_probability=0.0,
         downmix_probability=0.0,
@@ -44,14 +47,29 @@ def _build_validation_dataset(
         materialize_cached_signals=config.data.materialize_cached_signals,
         sequence_seconds=training_dataset.sequence_seconds,
         stride_seconds=training_dataset.stride_seconds,
+        sample_rate=config.data.sample_rate,
+        training_sample_rate=effective_sample_rate,
         sequence_mode=training_dataset.sequence_mode,
         full_song_max_seconds=training_dataset.full_song_max_seconds,
         amplitude_lift_enabled=config.data.amplitude_lift_enabled,
+        amplitude_lift_mode=config.data.amplitude_lift_mode,
         amplitude_lift_reference=config.data.amplitude_lift_reference,
         amplitude_lift_target_rms=config.data.amplitude_lift_target_rms,
         amplitude_lift_scale=config.data.amplitude_lift_scale,
         amplitude_lift_clip_value=config.data.amplitude_lift_clip_value,
+        amplitude_lift_gain_power=getattr(
+            config.data, "amplitude_lift_gain_power", 1.0
+        ),
+        amplitude_lift_gain_min_value=getattr(
+            config.data, "amplitude_lift_gain_min_value", None
+        ),
+        amplitude_lift_waveform_clamp=config.data.amplitude_lift_waveform_clamp,
+        amplitude_lift_peak_limit=config.data.amplitude_lift_peak_limit,
+        amplitude_lift_peak_rescale_min_rms=(
+            config.data.amplitude_lift_peak_rescale_min_rms
+        ),
         amplitude_lift_eps=config.data.amplitude_lift_eps,
+        min_source_rms=getattr(config.data, "min_source_rms", None),
     )
 
 
@@ -71,13 +89,16 @@ def _run_signal_validation(
 ) -> tuple[float, int]:
     """Evaluate mean signal validation loss across the validation dataloader."""
     was_training = model.training
+    effective_sample_rate = int(
+        getattr(config.data, "training_sample_rate", None) or config.data.sample_rate
+    )
     model.eval()
     try:
         local_loss_sum = torch.zeros((), device=accelerator.device, dtype=torch.float64)
         local_batch_count = torch.zeros((), device=accelerator.device, dtype=torch.long)
 
         for val_batch_idx, batch in enumerate(dataloader):
-            loss, _, _, _ = _compute_batch_flow_matching_loss(
+            loss, _, _, _, _ = _compute_batch_flow_matching_loss(
                 accelerator=accelerator,
                 model=model,
                 batch=batch,
@@ -109,8 +130,9 @@ def _run_signal_validation(
                     config.training.waveform_charbonnier_loss_weight
                 ),
                 waveform_charbonnier_eps=config.training.waveform_charbonnier_eps,
+                x_pred_v_loss_weight=config.training.x_pred_v_loss_weight,
                 perceptual_loss_weight=config.training.perceptual_loss_weight,
-                perceptual_sample_rate=config.data.sample_rate,
+                perceptual_sample_rate=effective_sample_rate,
                 perceptual_n_fft=config.training.perceptual_n_fft,
                 perceptual_hop_length=config.training.perceptual_hop_length,
                 perceptual_win_length=config.training.perceptual_win_length,
@@ -155,7 +177,7 @@ def _run_signal_validation(
                     config.training.binaural_mid_side_charbonnier_eps
                 ),
                 binaural_loss_warmup_steps=config.training.binaural_loss_warmup_steps,
-                binaural_sample_rate=config.data.sample_rate,
+                binaural_sample_rate=effective_sample_rate,
                 binaural_loss_eps=config.training.binaural_loss_eps,
             )
             local_loss_sum += loss.detach().to(dtype=torch.float64)
@@ -202,9 +224,12 @@ def _run_generation_validation(
 ) -> tuple[int, int]:
     """Run periodic audio generation validation and return success/error counts."""
     from stereo2spatial.common.amplitude_lift import (
+        amplitude_lift_log_gain,
         apply_amplitude_lift,
-        compute_shared_rms_gain,
+        resolve_amplitude_lift_gain,
         undo_amplitude_lift,
+        undo_wavflow_output_lift,
+        wavflow_source_transform,
     )
     from stereo2spatial.inference.audio import (
         read_audio_channels_first,
@@ -240,7 +265,10 @@ def _run_generation_validation(
         except StopIteration:
             model_device = accelerator.device
 
-        sample_rate = int(config.data.sample_rate)
+        sample_rate = int(
+            getattr(config.data, "training_sample_rate", None)
+            or config.data.sample_rate
+        )
         chunk_seconds = (
             float(config.training.validation_generation_chunk_seconds)
             if config.training.validation_generation_chunk_seconds is not None
@@ -275,41 +303,120 @@ def _run_generation_validation(
                         cond_channels=int(config.model.cond_channels),
                     )
                     amplitude_lift_gain = None
+                    amplitude_lift_log_gain_tensor: torch.Tensor | None = None
+                    amplitude_lift_mode = (
+                        str(getattr(config.data, "amplitude_lift_mode", "rms"))
+                        .strip()
+                        .lower()
+                    )
+                    _lift_scale = float(
+                        getattr(config.data, "amplitude_lift_scale", 3.0)
+                    )
+                    _lift_clip = getattr(config.data, "amplitude_lift_clip_value", 4.0)
+                    _lift_power = float(
+                        getattr(config.data, "amplitude_lift_gain_power", 1.0)
+                    )
+                    _lift_min = getattr(
+                        config.data, "amplitude_lift_gain_min_value", None
+                    )
+                    _lift_output_lufs = float(
+                        getattr(config.data, "amplitude_lift_output_lufs", -23.0)
+                    )
                     if bool(getattr(config.data, "amplitude_lift_enabled", False)):
-                        lift_reference = str(
-                            getattr(config.data, "amplitude_lift_reference", "source")
-                        ).strip().lower()
-                        if lift_reference != "source":
+                        lift_reference = (
+                            str(
+                                getattr(
+                                    config.data, "amplitude_lift_reference", "source"
+                                )
+                            )
+                            .strip()
+                            .lower()
+                        )
+                        if (
+                            amplitude_lift_mode != "wavflow"
+                            and lift_reference != "source"
+                        ):
                             raise ValueError(
                                 "Validation generation amplitude lifting requires "
                                 "data.amplitude_lift_reference='source' because "
                                 "target audio is unavailable."
                             )
-                        amplitude_lift_gain = compute_shared_rms_gain(
-                            conditioning_audio,
-                            target_rms=float(
-                                getattr(
-                                    config.data,
-                                    "amplitude_lift_target_rms",
-                                    0.33,
+                        if amplitude_lift_mode == "wavflow":
+                            (
+                                conditioning_audio,
+                                amplitude_lift_gain,
+                            ) = wavflow_source_transform(
+                                conditioning_audio,
+                                target_rms=float(
+                                    getattr(
+                                        config.data,
+                                        "amplitude_lift_target_rms",
+                                        0.33,
+                                    )
+                                ),
+                                scale=_lift_scale,
+                                peak_limit=float(
+                                    getattr(
+                                        config.data,
+                                        "amplitude_lift_peak_limit",
+                                        1.0,
+                                    )
+                                ),
+                                eps=float(
+                                    getattr(
+                                        config.data,
+                                        "amplitude_lift_eps",
+                                        1.0e-8,
+                                    )
+                                ),
+                            )
+                            amplitude_lift_log_gain_tensor = torch.log(
+                                amplitude_lift_gain.clamp_min(
+                                    float(
+                                        getattr(
+                                            config.data,
+                                            "amplitude_lift_eps",
+                                            1.0e-8,
+                                        )
+                                    )
                                 )
-                            ),
-                            eps=float(
-                                getattr(config.data, "amplitude_lift_eps", 1.0e-8)
-                            ),
-                        )
-                        conditioning_audio = apply_amplitude_lift(
-                            conditioning_audio,
-                            gain=amplitude_lift_gain,
-                            scale=float(
-                                getattr(config.data, "amplitude_lift_scale", 3.0)
-                            ),
-                            clip_value=getattr(
-                                config.data,
-                                "amplitude_lift_clip_value",
-                                4.0,
-                            ),
-                        )
+                            ).to(model_device)
+                        else:
+                            amplitude_lift_gain = resolve_amplitude_lift_gain(
+                                conditioning_audio,
+                                mode=amplitude_lift_mode,
+                                target_rms=float(
+                                    getattr(
+                                        config.data,
+                                        "amplitude_lift_target_rms",
+                                        0.33,
+                                    )
+                                ),
+                                eps=float(
+                                    getattr(config.data, "amplitude_lift_eps", 1.0e-8)
+                                ),
+                            )
+                            _lift_clip = (
+                                None if amplitude_lift_mode == "scale" else _lift_clip
+                            )
+                            conditioning_audio = apply_amplitude_lift(
+                                conditioning_audio,
+                                gain=amplitude_lift_gain,
+                                scale=_lift_scale,
+                                clip_value=_lift_clip,
+                                gain_power=_lift_power,
+                                gain_min_value=_lift_min,
+                            )
+                            amplitude_lift_log_gain_tensor = amplitude_lift_log_gain(
+                                amplitude_lift_gain,
+                                scale=_lift_scale,
+                                gain_clip_value=_lift_clip,
+                                gain_power=_lift_power,
+                                gain_min_value=_lift_min,
+                                eps=float(
+                                    getattr(config.data, "amplitude_lift_eps", 1.0e-8)
+                                ),
+                            ).to(model_device)
                     cond_signal, input_samples = _patch_audio(
                         conditioning_audio,
                         patch_size=int(config.model.patch_size),
@@ -334,22 +441,39 @@ def _run_generation_validation(
                         solver_rtol=solver_rtol,
                         solver_atol=solver_atol,
                         seed=seed,
+                        amplitude_gain=amplitude_lift_log_gain_tensor,
+                        one_step=bool(getattr(config.training, "flow_one_step", False)),
+                        one_step_input=str(
+                            getattr(config.training, "flow_one_step_input", "zeros")
+                        ),
                     )
                     decoded = _unpatch_audio(
                         pred_signal.cpu().float(),
                         sample_count=input_samples,
                     )
                     if amplitude_lift_gain is not None:
-                        decoded = undo_amplitude_lift(
-                            decoded,
-                            gain=amplitude_lift_gain.cpu(),
-                            scale=float(
-                                getattr(config.data, "amplitude_lift_scale", 3.0)
-                            ),
-                            eps=float(
-                                getattr(config.data, "amplitude_lift_eps", 1.0e-8)
-                            ),
-                        )
+                        if amplitude_lift_mode == "wavflow":
+                            decoded = undo_wavflow_output_lift(
+                                decoded,
+                                scale=_lift_scale,
+                                sample_rate=actual_sample_rate,
+                                target_lufs=_lift_output_lufs,
+                                eps=float(
+                                    getattr(config.data, "amplitude_lift_eps", 1.0e-8)
+                                ),
+                            )
+                        else:
+                            decoded = undo_amplitude_lift(
+                                decoded,
+                                gain=amplitude_lift_gain.cpu(),
+                                scale=_lift_scale,
+                                eps=float(
+                                    getattr(config.data, "amplitude_lift_eps", 1.0e-8)
+                                ),
+                                clip_value=_lift_clip,
+                                gain_power=_lift_power,
+                                gain_min_value=_lift_min,
+                            )
 
                     rel_path = input_audio_path.relative_to(input_root)
                     output_audio_path = (seed_root / rel_path).with_suffix(

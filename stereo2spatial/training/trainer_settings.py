@@ -51,6 +51,7 @@ class TrainerRuntimeSettings:
     waveform_l1_loss_weight: float
     waveform_charbonnier_loss_weight: float
     waveform_charbonnier_eps: float
+    x_pred_v_loss_weight: float
     perceptual_loss_weight: float
     perceptual_sample_rate: int
     perceptual_n_fft: int
@@ -154,10 +155,14 @@ def resolve_trainer_runtime_settings(config: TrainConfig) -> TrainerRuntimeSetti
     waveform_charbonnier_eps = float(
         getattr(config.training, "waveform_charbonnier_eps", 1e-3)
     )
+    x_pred_v_loss_weight = float(getattr(config.training, "x_pred_v_loss_weight", 0.0))
+    effective_sample_rate = int(
+        getattr(config.data, "training_sample_rate", None) or config.data.sample_rate
+    )
     perceptual_loss_weight = float(
         getattr(config.training, "perceptual_loss_weight", 0.0)
     )
-    perceptual_sample_rate = int(config.data.sample_rate)
+    perceptual_sample_rate = effective_sample_rate
     perceptual_n_fft = int(getattr(config.training, "perceptual_n_fft", 1024))
     perceptual_hop_length = int(getattr(config.training, "perceptual_hop_length", 256))
     perceptual_win_length = int(getattr(config.training, "perceptual_win_length", 1024))
@@ -216,7 +221,7 @@ def resolve_trainer_runtime_settings(config: TrainConfig) -> TrainerRuntimeSetti
     binaural_loss_warmup_steps = int(
         max(0, int(getattr(config.training, "binaural_loss_warmup_steps", 0)))
     )
-    binaural_sample_rate = int(config.data.sample_rate)
+    binaural_sample_rate = effective_sample_rate
     binaural_loss_eps = float(getattr(config.training, "binaural_loss_eps", 1e-7))
     use_channel_aux_losses = (
         routing_kl_weight > 0.0
@@ -272,6 +277,7 @@ def resolve_trainer_runtime_settings(config: TrainConfig) -> TrainerRuntimeSetti
         waveform_l1_loss_weight=waveform_l1_loss_weight,
         waveform_charbonnier_loss_weight=waveform_charbonnier_loss_weight,
         waveform_charbonnier_eps=waveform_charbonnier_eps,
+        x_pred_v_loss_weight=x_pred_v_loss_weight,
         perceptual_loss_weight=perceptual_loss_weight,
         perceptual_sample_rate=perceptual_sample_rate,
         perceptual_n_fft=perceptual_n_fft,

@@ -29,6 +29,7 @@ class TrainingStepResult:
     loss_adv_step: torch.Tensor | None
     loss_route_step: torch.Tensor | None
     loss_corr_step: torch.Tensor | None
+    loss_terms_step: dict[str, torch.Tensor]
     gan_lambda_adv_step: float
     skipped_step: bool = False
     skip_reason: str | None = None
@@ -55,6 +56,7 @@ def _make_skipped_result(
     loss_adv_step: torch.Tensor | None = None,
     loss_route_step: torch.Tensor | None = None,
     loss_corr_step: torch.Tensor | None = None,
+    loss_terms_step: dict[str, torch.Tensor] | None = None,
     gan_lambda_adv_step: float = 0.0,
     skip_reason: str,
     grad_norm: torch.Tensor | None = None,
@@ -70,6 +72,10 @@ def _make_skipped_result(
         if loss_route_step is not None
         else None,
         loss_corr_step=loss_corr_step.detach() if loss_corr_step is not None else None,
+        loss_terms_step={
+            name: value.detach()
+            for name, value in (loss_terms_step or {}).items()
+        },
         gan_lambda_adv_step=gan_lambda_adv_step,
         skipped_step=True,
         skip_reason=skip_reason,
@@ -110,6 +116,7 @@ def _run_training_step(
                 t_eff,
                 num_windows,
                 gan_aux,
+                loss_terms_step,
             ) = _compute_full_song_flow_matching_loss(
                 accelerator=accelerator,
                 model=model,
@@ -146,6 +153,7 @@ def _run_training_step(
                     settings.waveform_charbonnier_loss_weight
                 ),
                 waveform_charbonnier_eps=settings.waveform_charbonnier_eps,
+                x_pred_v_loss_weight=settings.x_pred_v_loss_weight,
                 perceptual_loss_weight=settings.perceptual_loss_weight,
                 perceptual_sample_rate=settings.perceptual_sample_rate,
                 perceptual_n_fft=settings.perceptual_n_fft,
@@ -186,7 +194,13 @@ def _run_training_step(
                 binaural_loss_eps=settings.binaural_loss_eps,
             )
         else:
-            loss_fm, t_eff, num_windows, gan_aux = _compute_batch_flow_matching_loss(
+            (
+                loss_fm,
+                t_eff,
+                num_windows,
+                gan_aux,
+                loss_terms_step,
+            ) = _compute_batch_flow_matching_loss(
                 accelerator=accelerator,
                 model=model,
                 batch=batch,
@@ -225,6 +239,7 @@ def _run_training_step(
                     settings.waveform_charbonnier_loss_weight
                 ),
                 waveform_charbonnier_eps=settings.waveform_charbonnier_eps,
+                x_pred_v_loss_weight=settings.x_pred_v_loss_weight,
                 perceptual_loss_weight=settings.perceptual_loss_weight,
                 perceptual_sample_rate=settings.perceptual_sample_rate,
                 perceptual_n_fft=settings.perceptual_n_fft,
@@ -309,6 +324,7 @@ def _run_training_step(
                     num_windows=num_windows,
                     loss_route_step=loss_route_step,
                     loss_corr_step=loss_corr_step,
+                    loss_terms_step=loss_terms_step,
                     skip_reason="nonfinite_loss",
                 )
             if not tbptt_backward_done_in_loss:
@@ -332,6 +348,7 @@ def _run_training_step(
                     loss_adv_step=loss_adv_step,
                     loss_route_step=loss_route_step,
                     loss_corr_step=loss_corr_step,
+                    loss_terms_step=loss_terms_step,
                     gan_lambda_adv_step=gan_lambda_adv_step,
                     skip_reason="nonfinite_grad_norm",
                     grad_norm=grad_norm,
@@ -360,6 +377,9 @@ def _run_training_step(
         loss_adv_step=loss_adv_step,
         loss_route_step=loss_route_step,
         loss_corr_step=loss_corr_step,
+        loss_terms_step={
+            name: value.detach() for name, value in loss_terms_step.items()
+        },
         gan_lambda_adv_step=gan_lambda_adv_step,
         grad_norm=grad_norm,
     )

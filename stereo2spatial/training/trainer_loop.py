@@ -46,6 +46,7 @@ class LatestAverages:
     avg_adv_loss: float | None = None
     avg_route_loss: float | None = None
     avg_corr_loss: float | None = None
+    avg_loss_terms: dict[str, float] | None = None
 
 
 def _create_progress_bar(
@@ -125,6 +126,7 @@ def _update_latest_averages(
     avg_adv_loss: float | None,
     avg_route_loss: float | None,
     avg_corr_loss: float | None,
+    avg_loss_terms: dict[str, float],
 ) -> None:
     """Mutate latest average state from newly reduced values."""
     latest.avg_loss = avg_loss
@@ -136,6 +138,7 @@ def _update_latest_averages(
         latest.avg_route_loss = avg_route_loss
     if avg_corr_loss is not None:
         latest.avg_corr_loss = avg_corr_loss
+    latest.avg_loss_terms = dict(avg_loss_terms)
 
 
 def run_training_loop(
@@ -228,6 +231,7 @@ def run_training_loop(
             loss_adv_step = step_result.loss_adv_step
             loss_route_step = step_result.loss_route_step
             loss_corr_step = step_result.loss_corr_step
+            loss_terms_step = step_result.loss_terms_step
             gan_lambda_adv_step = step_result.gan_lambda_adv_step
 
             if step_result.skipped_step:
@@ -264,6 +268,7 @@ def run_training_loop(
                     loss_adv_step=loss_adv_step,
                     loss_route_step=loss_route_step,
                     loss_corr_step=loss_corr_step,
+                    loss_terms_step=loss_terms_step,
                 )
                 if progress_bar is not None:
                     step_loss_value = float(loss.detach().item())
@@ -279,11 +284,13 @@ def run_training_loop(
                             gan_lambda_adv_step=gan_lambda_adv_step,
                             loss_route_step=loss_route_step,
                             loss_corr_step=loss_corr_step,
+                            loss_terms_step=loss_terms_step,
                             latest_avg_loss=latest.avg_loss,
                             latest_avg_d_loss=latest.avg_d_loss,
                             latest_avg_adv_loss=latest.avg_adv_loss,
                             latest_avg_route_loss=latest.avg_route_loss,
                             latest_avg_corr_loss=latest.avg_corr_loss,
+                            latest_avg_loss_terms=latest.avg_loss_terms,
                         ),
                         refresh=False,
                     )
@@ -301,6 +308,7 @@ def run_training_loop(
                     avg_adv_loss = reduced_averages.avg_adv_loss
                     avg_route_loss = reduced_averages.avg_route_loss
                     avg_corr_loss = reduced_averages.avg_corr_loss
+                    avg_loss_terms = reduced_averages.avg_loss_terms
                     _update_latest_averages(
                         latest=latest,
                         avg_loss=avg_loss,
@@ -308,6 +316,7 @@ def run_training_loop(
                         avg_adv_loss=avg_adv_loss,
                         avg_route_loss=avg_route_loss,
                         avg_corr_loss=avg_corr_loss,
+                        avg_loss_terms=avg_loss_terms,
                     )
                     if progress_bar is not None:
                         progress_bar.set_postfix(
@@ -323,10 +332,12 @@ def run_training_loop(
                                 gan_lambda_adv_step=gan_lambda_adv_step,
                                 loss_route_step=loss_route_step,
                                 loss_corr_step=loss_corr_step,
+                                loss_terms_step=loss_terms_step,
                                 avg_d_loss=avg_d_loss,
                                 avg_adv_loss=avg_adv_loss,
                                 avg_route_loss=avg_route_loss,
                                 avg_corr_loss=avg_corr_loss,
+                                avg_loss_terms=avg_loss_terms,
                             ),
                             refresh=False,
                         )
@@ -354,8 +365,10 @@ def run_training_loop(
                         avg_adv_loss=avg_adv_loss,
                         loss_route_step=loss_route_step,
                         loss_corr_step=loss_corr_step,
+                        loss_terms_step=loss_terms_step,
                         avg_route_loss=avg_route_loss,
                         avg_corr_loss=avg_corr_loss,
+                        avg_loss_terms=avg_loss_terms,
                         cond_stereo=cond_stereo,
                         cond_mono=cond_mono,
                         cond_downmix=cond_downmix,

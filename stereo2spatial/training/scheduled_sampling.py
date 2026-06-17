@@ -124,6 +124,7 @@ def _predict_clean(
     use_memory: bool,
     mix_style: torch.Tensor | None = None,
     mix_style_mask: torch.Tensor | None = None,
+    amplitude_gain: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run one clean-prediction model call with optional recurrent memory."""
     kwargs = {"zt": zt, "t": t, "z_cond": z_cond, "valid_mask": valid_mask}
@@ -131,6 +132,8 @@ def _predict_clean(
         kwargs["mix_style"] = mix_style
     if mix_style_mask is not None:
         kwargs["mix_style_mask"] = mix_style_mask
+    if amplitude_gain is not None:
+        kwargs["amplitude_gain"] = amplitude_gain
     if not use_memory:
         return (cast(torch.Tensor, model(**kwargs)), mem)
 
@@ -156,6 +159,7 @@ def _predict_clean_probe(
     use_memory: bool,
     mix_style: torch.Tensor | None = None,
     mix_style_mask: torch.Tensor | None = None,
+    amplitude_gain: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Run one clean-prediction call without mutating recurrent memory state.
@@ -169,6 +173,8 @@ def _predict_clean_probe(
         kwargs["mix_style"] = mix_style
     if mix_style_mask is not None:
         kwargs["mix_style_mask"] = mix_style_mask
+    if amplitude_gain is not None:
+        kwargs["amplitude_gain"] = amplitude_gain
     if not use_memory:
         return cast(torch.Tensor, model(**kwargs))
     kwargs["mem"] = mem
@@ -193,6 +199,7 @@ def _predict_velocity(
     use_memory: bool,
     mix_style: torch.Tensor | None = None,
     mix_style_mask: torch.Tensor | None = None,
+    amplitude_gain: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run clean prediction and convert it to the velocity used by rollout."""
     clean_prediction, next_mem = _predict_clean(
@@ -205,6 +212,7 @@ def _predict_velocity(
         use_memory=use_memory,
         mix_style=mix_style,
         mix_style_mask=mix_style_mask,
+        amplitude_gain=amplitude_gain,
     )
     return (
         _clean_prediction_to_velocity(clean_prediction=clean_prediction, zt=zt, t=t),
@@ -223,6 +231,7 @@ def _predict_velocity_probe(
     use_memory: bool,
     mix_style: torch.Tensor | None = None,
     mix_style_mask: torch.Tensor | None = None,
+    amplitude_gain: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Probe clean prediction and convert it to the velocity used by rollout."""
     clean_prediction = _predict_clean_probe(
@@ -235,6 +244,7 @@ def _predict_velocity_probe(
         use_memory=use_memory,
         mix_style=mix_style,
         mix_style_mask=mix_style_mask,
+        amplitude_gain=amplitude_gain,
     )
     return _clean_prediction_to_velocity(clean_prediction=clean_prediction, zt=zt, t=t)
 
@@ -311,6 +321,7 @@ def _predict_clean_windowed(
     overlap_frames: int,
     mix_style: torch.Tensor | None = None,
     mix_style_mask: torch.Tensor | None = None,
+    amplitude_gain: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     Evaluate clean prediction over a full sequence via overlap-add windows.
@@ -360,6 +371,7 @@ def _predict_clean_windowed(
             use_memory=use_memory,
             mix_style=mix_style,
             mix_style_mask=mix_style_mask,
+            amplitude_gain=amplitude_gain,
         )
 
         weight = _common_chunk_weight(
@@ -397,6 +409,7 @@ def _rollout_to_target_with_fixed_memory(
     use_memory: bool,
     mix_style: torch.Tensor | None = None,
     mix_style_mask: torch.Tensor | None = None,
+    amplitude_gain: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Integrate one rollout interval while keeping recurrent memory fixed.
@@ -429,6 +442,7 @@ def _rollout_to_target_with_fixed_memory(
             use_memory=use_memory,
             mix_style=mix_style,
             mix_style_mask=mix_style_mask,
+            amplitude_gain=amplitude_gain,
         )
         if sampler == "heun":
             euler_state = current + dt * velocity_curr
@@ -443,6 +457,7 @@ def _rollout_to_target_with_fixed_memory(
                 use_memory=use_memory,
                 mix_style=mix_style,
                 mix_style_mask=mix_style_mask,
+                amplitude_gain=amplitude_gain,
             )
             current = current + 0.5 * dt * (velocity_curr + velocity_next)
         elif sampler == "unipc":
@@ -463,6 +478,7 @@ def _rollout_to_target_with_fixed_memory(
                 use_memory=use_memory,
                 mix_style=mix_style,
                 mix_style_mask=mix_style_mask,
+                amplitude_gain=amplitude_gain,
             )
             if previous_velocity is None:
                 current = current + 0.5 * dt * (velocity_curr + velocity_next)
@@ -660,6 +676,7 @@ def apply_flow_matching_scheduled_sampling(
     global_step: int,
     mix_style: torch.Tensor | None = None,
     mix_style_mask: torch.Tensor | None = None,
+    amplitude_gain: torch.Tensor | None = None,
     plan: ScheduledSamplingPlan | None = None,
     window_frames: int | None = None,
     overlap_frames: int = 0,
@@ -804,6 +821,7 @@ def apply_flow_matching_scheduled_sampling(
         mix_style_mask_i = (
             mix_style_mask[idx : idx + 1] if mix_style_mask is not None else None
         )
+        amplitude_gain_i = amplitude_gain[idx : idx + 1] if amplitude_gain is not None else None
         clean_t_batch = torch.tensor([target_t_original], device=device, dtype=t.dtype)
         target_t_batch = torch.tensor([target_t], device=device, dtype=t.dtype)
         mem_i: torch.Tensor | None = (
@@ -844,6 +862,7 @@ def apply_flow_matching_scheduled_sampling(
                     overlap_frames=int(overlap_frames),
                     mix_style=mix_style_i,
                     mix_style_mask=mix_style_mask_i,
+                    amplitude_gain=amplitude_gain_i,
                 )
             else:
                 clean_pred, _ = _predict_clean(
@@ -856,6 +875,7 @@ def apply_flow_matching_scheduled_sampling(
                     use_memory=use_memory,
                     mix_style=mix_style_i,
                     mix_style_mask=mix_style_mask_i,
+                    amplitude_gain=amplitude_gain_i,
                 )
             clean_preds[idx : idx + 1] = clean_pred.to(device=device, dtype=dtype)
 
@@ -934,6 +954,7 @@ def apply_flow_matching_scheduled_sampling(
                     use_memory=use_memory,
                     mix_style=mix_style_i,
                     mix_style_mask=mix_style_mask_i,
+                    amplitude_gain=amplitude_gain_i,
                 )
 
                 if use_memory:
@@ -947,6 +968,7 @@ def apply_flow_matching_scheduled_sampling(
                         use_memory=True,
                         mix_style=mix_style_i,
                         mix_style_mask=mix_style_mask_i,
+                        amplitude_gain=amplitude_gain_i,
                     )
                 else:
                     biased_pred_w, _ = _predict_clean(
@@ -959,6 +981,7 @@ def apply_flow_matching_scheduled_sampling(
                         use_memory=False,
                         mix_style=mix_style_i,
                         mix_style_mask=mix_style_mask_i,
+                        amplitude_gain=amplitude_gain_i,
                     )
 
                 weight = _common_chunk_weight(
@@ -1018,6 +1041,7 @@ def apply_flow_matching_scheduled_sampling(
                 use_memory=use_memory,
                 mix_style=mix_style_i,
                 mix_style_mask=mix_style_mask_i,
+                amplitude_gain=amplitude_gain_i,
             )
             if sampler == "heun":
                 euler_state = current + dt * velocity_curr
@@ -1032,6 +1056,7 @@ def apply_flow_matching_scheduled_sampling(
                     use_memory=use_memory,
                     mix_style=mix_style_i,
                     mix_style_mask=mix_style_mask_i,
+                    amplitude_gain=amplitude_gain_i,
                 )
                 current = current + 0.5 * dt * (velocity_curr + velocity_next)
             elif sampler == "unipc":
@@ -1052,6 +1077,7 @@ def apply_flow_matching_scheduled_sampling(
                     use_memory=use_memory,
                     mix_style=mix_style_i,
                     mix_style_mask=mix_style_mask_i,
+                    amplitude_gain=amplitude_gain_i,
                 )
                 if previous_velocity is None:
                     current = current + 0.5 * dt * (velocity_curr + velocity_next)
@@ -1077,6 +1103,7 @@ def apply_flow_matching_scheduled_sampling(
                 use_memory=use_memory,
                 mix_style=mix_style_i,
                 mix_style_mask=mix_style_mask_i,
+                amplitude_gain=amplitude_gain_i,
             )
             biased_preds[idx : idx + 1] = biased_pred.to(device=device, dtype=dtype)
 
