@@ -41,12 +41,16 @@ def build_training_components(
         )
     )
 
+    training_sample_rate = int(
+        getattr(config.data, "training_sample_rate", None) or config.data.sample_rate
+    )
+
     dataset = WaveformSongDataset(
         dataset_root=config.data.dataset_root,
         manifest_path=config.data.manifest_path,
         sample_artifact_mode=config.data.sample_artifact_mode,
         segment_seconds=config.data.segment_seconds,
-        patch_fps=float(config.data.sample_rate) / float(config.model.patch_size),
+        patch_fps=float(training_sample_rate) / float(config.model.patch_size),
         patch_size=config.model.patch_size,
         mono_probability=config.data.mono_probability,
         downmix_probability=config.data.downmix_probability,
@@ -54,22 +58,38 @@ def build_training_components(
         shuffle_segments_within_epoch=config.data.shuffle_segments_within_epoch,
         shuffle_segments_within_song=config.data.shuffle_segments_within_song,
         seed=config.seed,
+        sample_exclusion_path=config.data.sample_exclusion_path,
         materialize_cached_signals=config.data.materialize_cached_signals,
         sequence_seconds=max_seq_seconds,
         stride_seconds=stride_seconds,
+        sample_rate=config.data.sample_rate,
+        training_sample_rate=training_sample_rate,
         sequence_mode=sequence_mode,
         full_song_max_seconds=full_song_max_seconds,
         amplitude_lift_enabled=config.data.amplitude_lift_enabled,
+        amplitude_lift_mode=config.data.amplitude_lift_mode,
         amplitude_lift_reference=config.data.amplitude_lift_reference,
         amplitude_lift_target_rms=config.data.amplitude_lift_target_rms,
         amplitude_lift_scale=config.data.amplitude_lift_scale,
         amplitude_lift_clip_value=config.data.amplitude_lift_clip_value,
+        amplitude_lift_gain_power=getattr(
+            config.data, "amplitude_lift_gain_power", 1.0
+        ),
+        amplitude_lift_gain_min_value=getattr(
+            config.data, "amplitude_lift_gain_min_value", None
+        ),
+        amplitude_lift_waveform_clamp=config.data.amplitude_lift_waveform_clamp,
+        amplitude_lift_peak_limit=config.data.amplitude_lift_peak_limit,
+        amplitude_lift_peak_rescale_min_rms=(
+            config.data.amplitude_lift_peak_rescale_min_rms
+        ),
         amplitude_lift_eps=config.data.amplitude_lift_eps,
+        min_source_rms=getattr(config.data, "min_source_rms", None),
         source_resample_aug_enabled=config.data.source_resample_aug_enabled,
         source_resample_aug_probability=config.data.source_resample_aug_probability,
         source_resample_aug_rates=config.data.source_resample_aug_rates,
         source_resample_aug_weights=config.data.source_resample_aug_weights,
-        source_resample_aug_sample_rate=config.data.sample_rate,
+        source_resample_aug_sample_rate=training_sample_rate,
         source_codec_aug_enabled=config.data.source_codec_aug_enabled,
         source_codec_aug_probability=config.data.source_codec_aug_probability,
         source_codec_aug_start_step=config.data.source_codec_aug_start_step,
@@ -85,9 +105,7 @@ def build_training_components(
             config.data.source_codec_aug_max_chunk_seconds
         ),
         source_codec_aug_align_max_lag=config.data.source_codec_aug_align_max_lag,
-        source_codec_aug_timeout_seconds=(
-            config.data.source_codec_aug_timeout_seconds
-        ),
+        source_codec_aug_timeout_seconds=(config.data.source_codec_aug_timeout_seconds),
     )
     target_channel_counts = sorted({song.target_channels for song in dataset._songs})
     if target_channel_counts != [int(config.model.target_channels)]:
@@ -97,11 +115,7 @@ def build_training_components(
             "Render a dataset for the requested output layout before training."
         )
     mix_style_lengths = sorted(
-        {
-            len(song.mix_style)
-            for song in dataset._songs
-            if song.mix_style is not None
-        }
+        {len(song.mix_style) for song in dataset._songs if song.mix_style is not None}
     )
     expected_mix_style_dim = int(getattr(config.model, "mix_style_dim", 0))
     if expected_mix_style_dim > 0 and mix_style_lengths != [expected_mix_style_dim]:
@@ -125,6 +139,9 @@ def build_training_components(
         max_period=config.model.max_period,
         num_memory_tokens=getattr(config.model, "num_memory_tokens", 0),
         mix_style_dim=getattr(config.model, "mix_style_dim", 0),
+        amplitude_gain_conditioning=getattr(
+            config.model, "amplitude_gain_conditioning", False
+        ),
         waveform_level_depth=getattr(config.model, "waveform_level_depth", 0),
         waveform_micro_patch_size=getattr(
             config.model, "waveform_micro_patch_size", 16
@@ -132,6 +149,10 @@ def build_training_components(
         waveform_hidden_dim=getattr(config.model, "waveform_hidden_dim", 16),
         waveform_num_heads=getattr(config.model, "waveform_num_heads", None),
         waveform_mlp_ratio=getattr(config.model, "waveform_mlp_ratio", 2.0),
+        final_output_kernel_size=getattr(config.model, "final_output_kernel_size", 7),
+        final_output_zero_init=getattr(config.model, "final_output_zero_init", False),
+        rope_enabled=getattr(config.model, "rope_enabled", True),
+        rope_theta=getattr(config.model, "rope_theta", 10000.0),
         activation_checkpointing=getattr(
             config.model, "activation_checkpointing", False
         ),

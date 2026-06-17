@@ -59,3 +59,74 @@ def positional_embedding_1d(
         emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=-1)
     return emb
 
+
+def rotary_embedding_1d(
+    *,
+    positions: torch.Tensor,
+    dim: int,
+    max_period: float = 10000.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Build rotary embedding cos/sin tensors for attention head positions.
+
+    Args:
+        positions: Float tensor with shape `[N]`.
+        dim: Attention head width. Must be even.
+        max_period: Rotary frequency base.
+
+    Returns:
+        `(cos, sin)` each shaped `[1, 1, N, dim / 2]`.
+    """
+    if dim <= 0 or dim % 2 != 0:
+        raise ValueError("rotary dim must be a positive even integer")
+    if positions.dim() != 1:
+        raise ValueError(f"positions must be [N], got {tuple(positions.shape)}")
+
+    half = dim // 2
+    exponent = torch.arange(
+        start=0,
+        end=dim,
+        step=2,
+        dtype=torch.float32,
+        device=positions.device,
+    )
+    exponent = exponent / float(dim)
+    freqs = torch.exp(-math.log(max_period) * exponent)
+    angles = positions.float()[:, None] * freqs[None, :]
+    cos = torch.cos(angles)[None, None, :, :]
+    sin = torch.sin(angles)[None, None, :, :]
+    if cos.shape[-1] != half:
+        raise RuntimeError("unexpected rotary embedding shape")
+    return cos, sin
+
+
+def apply_rotary_embedding(
+    x: torch.Tensor,
+    rope: tuple[torch.Tensor, torch.Tensor] | None,
+) -> torch.Tensor:
+    """Apply rotary embeddings to a `[B, heads, tokens, head_dim]` tensor."""
+    if rope is None:
+        return x
+    cos, sin = rope
+    if x.shape[-1] % 2 != 0:
+        raise ValueError("rotary embedding requires an even attention head dimension")
+    if cos.shape[-2] != x.shape[-2] or sin.shape[-2] != x.shape[-2]:
+        raise ValueError(
+            "rotary length mismatch: "
+            f"x tokens={x.shape[-2]}, cos={cos.shape[-2]}, sin={sin.shape[-2]}"
+        )
+    if cos.shape[-1] != x.shape[-1] // 2 or sin.shape[-1] != x.shape[-1] // 2:
+        raise ValueError(
+            "rotary head-dim mismatch: "
+            f"x head_dim={x.shape[-1]}, cos={cos.shape[-1]}, sin={sin.shape[-1]}"
+        )
+
+    x_float = x.float()
+    even = x_float[..., 0::2]
+    odd = x_float[..., 1::2]
+    cos = cos.to(device=x.device)
+    sin = sin.to(device=x.device)
+    out = torch.empty_like(x_float)
+    out[..., 0::2] = even * cos - odd * sin
+    out[..., 1::2] = even * sin + odd * cos
+    return out.to(dtype=x.dtype)
