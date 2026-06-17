@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 
+import stereo2spatial.cli.infer as infer_cli
 from stereo2spatial.cli.infer import (
+    _iter_input_audio_paths,
     _load_runtime_config_and_bundle_payload,
+    _resolve_output_audio_path,
+    _resolve_report_json_path,
     resolve_cli_config_path,
 )
 from stereo2spatial.inference.export_bundle import (
@@ -18,6 +23,7 @@ from stereo2spatial.inference.export_bundle import (
     export_model_bundle,
     resolve_inference_config_path,
 )
+from stereo2spatial.training.config import load_config
 
 
 class _TinyModel(torch.nn.Module):
@@ -69,6 +75,10 @@ def _resolved_config_payload(
             "waveform_hidden_dim": 16,
             "waveform_num_heads": 4,
             "waveform_mlp_ratio": 2.0,
+            "final_output_kernel_size": 9,
+            "final_output_zero_init": True,
+            "rope_enabled": True,
+            "rope_theta": 20000.0,
         },
         "training": {
             "max_steps": 1000,
@@ -174,8 +184,6 @@ def _write_training_run(
     return run_dir, checkpoint_dir
 
 
-
-
 def test_export_model_bundle_prefers_ema_state_when_available(tmp_path: Path) -> None:
     student_model = _TinyModel()
     ema_model = _TinyModel()
@@ -254,6 +262,476 @@ def test_cli_bundle_helpers_resolve_config(tmp_path: Path) -> None:
     assert config.model.waveform_micro_patch_size == 16
     assert config.model.waveform_hidden_dim == 16
     assert config.model.waveform_num_heads == 4
+    assert config.model.final_output_kernel_size == 9
+    assert config.model.final_output_zero_init is True
+    assert config.model.rope_enabled is True
+    assert config.model.rope_theta == pytest.approx(20000.0)
+
+
+def test_infer_cli_discovers_audio_files_recursively(tmp_path: Path) -> None:
+    input_dir = tmp_path / "validation"
+    nested_dir = input_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    (input_dir / "b.flac").write_bytes(b"fake")
+    (nested_dir / "a.wav").write_bytes(b"fake")
+    (nested_dir / "notes.txt").write_text("ignore", encoding="utf-8")
+
+    discovered = _iter_input_audio_paths(input_dir)
+
+    assert discovered == [input_dir / "b.flac", nested_dir / "a.wav"]
+
+
+def test_infer_cli_preserves_folder_layout_for_outputs_and_reports(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "validation"
+    input_path = input_dir / "artist" / "song.wav"
+    output_dir = tmp_path / "out"
+    report_dir = tmp_path / "reports"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_bytes(b"fake")
+
+    headphone_output_path = _resolve_output_audio_path(
+        input_audio_path=input_path,
+        input_root_path=input_dir,
+        output_root_path=output_dir,
+        target_channels=2,
+    )
+    spatial_output_path = _resolve_output_audio_path(
+        input_audio_path=input_path,
+        input_root_path=input_dir,
+        output_root_path=output_dir,
+        target_channels=12,
+    )
+    report_path = _resolve_report_json_path(
+        input_audio_path=input_path,
+        input_root_path=input_dir,
+        report_root_path=report_dir,
+    )
+
+    assert headphone_output_path == output_dir / "artist" / "song.flac"
+    assert spatial_output_path == output_dir / "artist" / "song.wav"
+    assert report_path == report_dir / "artist" / "song.json"
+
+
+def test_infer_cli_keeps_explicit_single_file_output_path(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.wav"
+    output_path = tmp_path / "custom_output.flac"
+    report_path = tmp_path / "report.json"
+    input_path.write_bytes(b"fake")
+
+    assert _iter_input_audio_paths(input_path) == [input_path]
+    assert (
+        _resolve_output_audio_path(
+            input_audio_path=input_path,
+            input_root_path=input_path,
+            output_root_path=output_path,
+            target_channels=12,
+        )
+        == output_path
+    )
+    assert (
+        _resolve_report_json_path(
+            input_audio_path=input_path,
+            input_root_path=input_path,
+            report_root_path=report_path,
+        )
+        == report_path
+    )
+
+
+def test_infer_cli_folder_mode_reuses_session_without_device_arg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "inputs"
+    output_dir = tmp_path / "outputs"
+    report_dir = tmp_path / "reports"
+    checkpoint_path = tmp_path / "checkpoint"
+    input_dir.mkdir()
+    checkpoint_path.mkdir()
+    (input_dir / "a.wav").write_bytes(b"fake")
+    (input_dir / "b.flac").write_bytes(b"fake")
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=2,
+        student_state={
+            "_orig_mod.linear.weight": torch.zeros((3, 4)),
+            "_orig_mod.linear.bias": torch.zeros((3,)),
+        },
+    )
+    config_path = run_dir / "resolved_config.json"
+    train_config = load_config(config_path)
+
+    class _Session:
+        run_device = "cuda"
+        compile_mode = "default"
+
+    calls: list[dict[str, object]] = []
+
+    def fake_load_config(_path: Path) -> object:
+        return train_config, None
+
+    def fake_build_session(**kwargs: object) -> object:
+        assert kwargs["device"] == "cuda"
+        assert kwargs["compile_model"] is True
+        return _Session()
+
+    def fake_run_with_session(**kwargs: object) -> dict[str, object]:
+        assert "device" not in kwargs
+        calls.append(kwargs)
+        output_path = Path(kwargs["output_audio_path"])
+        return {
+            "config_path": str(config_path),
+            "input_audio_path": str(kwargs["input_audio_path"]),
+            "output_audio_path": str(output_path),
+            "checkpoint_path": str(checkpoint_path),
+            "weights_source": "student",
+            "device": "cuda",
+            "input_channels": 2,
+            "sample_rate": 48000,
+            "conditioning_signal_shape": [2, 200, 1],
+            "pred_signal_shape": [2, 200, 1],
+            "decoded_shape": [2, 200],
+            "patch_fps": 240.0,
+            "chunk_frames": 1,
+            "overlap_frames": 0,
+            "solver": "res6s",
+            "seed": 1337,
+            "mix_style_preset": None,
+            "mix_style": None,
+            "compiled": True,
+            "compile_mode": "default",
+        }
+
+    monkeypatch.setattr(
+        infer_cli,
+        "_load_runtime_config_and_bundle_payload",
+        fake_load_config,
+    )
+    monkeypatch.setattr(infer_cli, "build_inference_session", fake_build_session)
+    monkeypatch.setattr(infer_cli, "run_inference_with_session", fake_run_with_session)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "infer",
+            "--config",
+            str(config_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--input-audio",
+            str(input_dir),
+            "--output-audio",
+            str(output_dir),
+            "--report-json",
+            str(report_dir),
+            "--device",
+            "cuda",
+            "--solver",
+            "res6s",
+            "--solver-steps",
+            "20",
+            "--weights-source",
+            "student",
+            "--compile-model",
+        ],
+    )
+
+    infer_cli.main()
+
+    assert len(calls) == 2
+    assert (report_dir / "a.json").exists()
+    assert (report_dir / "b.json").exists()
+
+
+def test_infer_cli_dynamic_folder_mode_dispatches_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "inputs"
+    output_dir = tmp_path / "outputs"
+    report_dir = tmp_path / "reports"
+    checkpoint_path = tmp_path / "checkpoint"
+    input_dir.mkdir()
+    checkpoint_path.mkdir()
+    (input_dir / "a.wav").write_bytes(b"fake")
+    (input_dir / "nested").mkdir()
+    (input_dir / "nested" / "b.flac").write_bytes(b"fake")
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=2,
+        student_state={
+            "_orig_mod.linear.weight": torch.zeros((3, 4)),
+            "_orig_mod.linear.bias": torch.zeros((3,)),
+        },
+    )
+    config_path = run_dir / "resolved_config.json"
+    train_config = load_config(config_path)
+
+    class _Session:
+        run_device = "cuda"
+        compile_mode = None
+
+    captured: dict[str, object] = {}
+
+    def fake_load_config(_path: Path) -> object:
+        return train_config, None
+
+    def fake_build_session(**kwargs: object) -> object:
+        captured["session_kwargs"] = kwargs
+        return _Session()
+
+    def fake_dynamic_folder(**kwargs: object) -> object:
+        captured["dynamic_kwargs"] = kwargs
+        jobs = list(kwargs["jobs"])
+        reports = []
+        for job in jobs:
+            reports.append(
+                {
+                    "output_audio_path": str(job.output_audio_path),
+                    "input_audio_path": str(job.input_audio_path),
+                }
+            )
+        return SimpleNamespace(
+            reports=reports,
+            errors=[],
+            stats=SimpleNamespace(
+                scheduler=SimpleNamespace(
+                    model_batches=3,
+                    model_queries=6,
+                    max_observed_batch_size=2,
+                    completed_controllers=4,
+                )
+            ),
+        )
+
+    monkeypatch.setattr(
+        infer_cli,
+        "_load_runtime_config_and_bundle_payload",
+        fake_load_config,
+    )
+    monkeypatch.setattr(infer_cli, "build_inference_session", fake_build_session)
+    monkeypatch.setattr(infer_cli, "run_dynamic_folder_inference", fake_dynamic_folder)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "infer",
+            "--config",
+            str(config_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--input-audio",
+            str(input_dir),
+            "--output-audio",
+            str(output_dir),
+            "--report-json",
+            str(report_dir),
+            "--device",
+            "cuda",
+            "--solver",
+            "midpoint_rk2",
+            "--solver-steps",
+            "20",
+            "--weights-source",
+            "student",
+            "--dynamic-batching",
+            "--max-batch-size",
+            "2",
+            "--max-active-requests",
+            "3",
+        ],
+    )
+
+    infer_cli.main()
+
+    dynamic_kwargs = captured["dynamic_kwargs"]
+    jobs = list(dynamic_kwargs["jobs"])
+    assert len(jobs) == 2
+    assert jobs[0].output_audio_path == output_dir / "a.flac"
+    assert jobs[1].output_audio_path == output_dir / "nested" / "b.flac"
+    assert dynamic_kwargs["max_batch_size"] == 2
+    assert dynamic_kwargs["max_active_requests"] == 3
+    assert dynamic_kwargs["solver"] == "midpoint_rk2"
+    assert (report_dir / "a.json").exists()
+    assert (report_dir / "nested" / "b.json").exists()
+
+
+def test_infer_cli_dynamic_folder_mode_skips_existing_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "inputs"
+    output_dir = tmp_path / "outputs"
+    checkpoint_path = tmp_path / "checkpoint"
+    input_dir.mkdir()
+    checkpoint_path.mkdir()
+    output_dir.mkdir()
+    (input_dir / "a.wav").write_bytes(b"fake")
+    (input_dir / "b.wav").write_bytes(b"fake")
+    (output_dir / "a.flac").write_bytes(b"done")
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=2,
+        student_state={
+            "_orig_mod.linear.weight": torch.zeros((3, 4)),
+            "_orig_mod.linear.bias": torch.zeros((3,)),
+        },
+    )
+    config_path = run_dir / "resolved_config.json"
+    train_config = load_config(config_path)
+
+    class _Session:
+        run_device = "cuda"
+        compile_mode = None
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        infer_cli,
+        "_load_runtime_config_and_bundle_payload",
+        lambda _path: (train_config, None),
+    )
+    monkeypatch.setattr(
+        infer_cli,
+        "build_inference_session",
+        lambda **kwargs: _Session(),
+    )
+
+    def fake_dynamic_folder(**kwargs: object) -> object:
+        captured["dynamic_kwargs"] = kwargs
+        jobs = list(kwargs["jobs"])
+        return SimpleNamespace(
+            reports=[
+                {
+                    "output_audio_path": str(job.output_audio_path),
+                    "input_audio_path": str(job.input_audio_path),
+                }
+                for job in jobs
+            ],
+            errors=[],
+            stats=SimpleNamespace(
+                scheduler=SimpleNamespace(
+                    model_batches=1,
+                    model_queries=1,
+                    max_observed_batch_size=1,
+                    completed_controllers=1,
+                )
+            ),
+        )
+
+    monkeypatch.setattr(infer_cli, "run_dynamic_folder_inference", fake_dynamic_folder)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "infer",
+            "--config",
+            str(config_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--input-audio",
+            str(input_dir),
+            "--output-audio",
+            str(output_dir),
+            "--dynamic-batching",
+            "--weights-source",
+            "student",
+        ],
+    )
+
+    infer_cli.main()
+
+    jobs = list(captured["dynamic_kwargs"]["jobs"])
+    assert len(jobs) == 1
+    assert jobs[0].input_audio_path == input_dir / "b.wav"
+    assert jobs[0].output_audio_path == output_dir / "b.flac"
+
+
+def test_infer_cli_force_overwrite_keeps_existing_outputs_in_work_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "inputs"
+    output_dir = tmp_path / "outputs"
+    checkpoint_path = tmp_path / "checkpoint"
+    input_dir.mkdir()
+    checkpoint_path.mkdir()
+    output_dir.mkdir()
+    (input_dir / "a.wav").write_bytes(b"fake")
+    (output_dir / "a.flac").write_bytes(b"done")
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=2,
+        student_state={
+            "_orig_mod.linear.weight": torch.zeros((3, 4)),
+            "_orig_mod.linear.bias": torch.zeros((3,)),
+        },
+    )
+    config_path = run_dir / "resolved_config.json"
+    train_config = load_config(config_path)
+
+    class _Session:
+        run_device = "cuda"
+        compile_mode = None
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        infer_cli,
+        "_load_runtime_config_and_bundle_payload",
+        lambda _path: (train_config, None),
+    )
+    monkeypatch.setattr(
+        infer_cli,
+        "build_inference_session",
+        lambda **kwargs: _Session(),
+    )
+
+    def fake_dynamic_folder(**kwargs: object) -> object:
+        captured["dynamic_kwargs"] = kwargs
+        jobs = list(kwargs["jobs"])
+        return SimpleNamespace(
+            reports=[
+                {
+                    "output_audio_path": str(job.output_audio_path),
+                    "input_audio_path": str(job.input_audio_path),
+                }
+                for job in jobs
+            ],
+            errors=[],
+            stats=SimpleNamespace(
+                scheduler=SimpleNamespace(
+                    model_batches=1,
+                    model_queries=1,
+                    max_observed_batch_size=1,
+                    completed_controllers=1,
+                )
+            ),
+        )
+
+    monkeypatch.setattr(infer_cli, "run_dynamic_folder_inference", fake_dynamic_folder)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "infer",
+            "--config",
+            str(config_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--input-audio",
+            str(input_dir),
+            "--output-audio",
+            str(output_dir),
+            "--dynamic-batching",
+            "--force-overwrite",
+            "--weights-source",
+            "student",
+        ],
+    )
+
+    infer_cli.main()
+
+    jobs = list(captured["dynamic_kwargs"]["jobs"])
+    assert len(jobs) == 1
+    assert jobs[0].input_audio_path == input_dir / "a.wav"
 
 
 def test_export_model_bundle_resolves_5_1_rear_layout_metadata(tmp_path: Path) -> None:

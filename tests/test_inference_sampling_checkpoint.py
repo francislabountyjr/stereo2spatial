@@ -239,7 +239,38 @@ def test_generate_spatial_signal_supports_res6s_solver() -> None:
     assert not torch.allclose(pred_res6s, pred_heun)
 
 
-@pytest.mark.parametrize("solver", ["euler", "heun", "unipc", "res6s"])
+def test_generate_spatial_signal_supports_midpoint_rk2_solver() -> None:
+    model = _StateAwareSamplingModel()
+    cond_signal = torch.randn(1, 3, 9)
+
+    pred_midpoint = generate_spatial_signal(
+        model=cast(Any, model),
+        cond_signal=cond_signal,
+        chunk_frames=4,
+        overlap_frames=1,
+        solver="midpoint_rk2",
+        solver_steps=4,
+        solver_rtol=1e-5,
+        solver_atol=1e-5,
+        seed=123,
+    )
+    pred_euler = generate_spatial_signal(
+        model=cast(Any, model),
+        cond_signal=cond_signal,
+        chunk_frames=4,
+        overlap_frames=1,
+        solver="euler",
+        solver_steps=4,
+        solver_rtol=1e-5,
+        solver_atol=1e-5,
+        seed=123,
+    )
+
+    assert pred_midpoint.shape == (2, 3, 9)
+    assert not torch.allclose(pred_midpoint, pred_euler)
+
+
+@pytest.mark.parametrize("solver", ["euler", "heun", "unipc", "midpoint_rk2", "res6s"])
 def test_generate_spatial_signal_never_evaluates_clean_velocity_at_t_one(
     solver: str,
 ) -> None:
@@ -278,8 +309,10 @@ def test_generate_spatial_signal_threads_memory_between_chunks(
         solver_rtol: float,
         solver_atol: float,
         mem: torch.Tensor | None,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         del model, cond_chunk, valid_mask, solver, solver_steps, solver_rtol, solver_atol
+        del kwargs
         if mem is not None:
             seen_mem_values.append(float(mem.mean().item()))
             return z0_chunk, mem + 1.0

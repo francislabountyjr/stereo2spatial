@@ -7,20 +7,35 @@ import json
 import sys
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 from stereo2spatial.common.mix_style import (
     mix_style_preset_description,
     mix_style_preset_names,
     mix_style_preset_values,
 )
-from stereo2spatial.inference import run_inference
+from stereo2spatial.inference.cuda_graphs import (
+    CudaGraphModelRunner,
+    parse_cuda_graph_buckets,
+)
 from stereo2spatial.inference.export_bundle import (
     DEFAULT_BUNDLE_OVERLAP_SECONDS,
     build_train_config_from_bundle_payload,
     load_inference_bundle_payload,
     resolve_inference_config_path,
 )
-from stereo2spatial.inference.runner import RequestedSolverName, WeightsSource
+from stereo2spatial.inference.offline_batch import (
+    DynamicInferenceJob,
+    run_dynamic_folder_inference,
+)
+from stereo2spatial.inference.runner import (
+    InferenceDTypeName,
+    RequestedSolverName,
+    WeightsSource,
+    build_inference_session,
+    run_inference_with_session,
+)
+from stereo2spatial.inference.sdpa import SDPABackendName, sdpa_backend_context
 from stereo2spatial.training.config import TrainConfig, load_config
 
 SOLVER_CHOICES = (
@@ -32,11 +47,23 @@ SOLVER_CHOICES = (
     "res6s",
     "res_6s",
     "midpoint",
+    "midpoint_rk2",
+    "midpoint-rk2",
+    "rk2",
     "rk4",
     "explicit_adams",
     "implicit_adams",
 )
 MIX_STYLE_PRESET_CHOICES = mix_style_preset_names()
+_AUDIO_SUFFIXES = {".wav", ".flac", ".aif", ".aiff", ".ogg", ".mp3", ".m4a"}
+COMPILE_MODE_CHOICES = (
+    "default",
+    "reduce-overhead",
+    "max-autotune",
+    "max-autotune-no-cudagraphs",
+)
+INFERENCE_DTYPE_CHOICES = ("float32", "float16", "bfloat16", "auto")
+SDPA_BACKEND_CHOICES = ("auto", "flash", "efficient", "math")
 
 
 def _safe_print(message: str) -> None:
@@ -112,6 +139,60 @@ def _parse_mix_style_json(raw: str | None) -> list[float] | dict[str, float] | N
     raise TypeError("--mix-style-json must be a JSON list or object")
 
 
+def _iter_input_audio_paths(input_audio_path: Path) -> list[Path]:
+    """Resolve a single input file or recursively discover audio files in a folder."""
+    if input_audio_path.is_file():
+        if input_audio_path.suffix.lower() not in _AUDIO_SUFFIXES:
+            raise ValueError(f"Unsupported input audio file: {input_audio_path}")
+        return [input_audio_path]
+    if not input_audio_path.is_dir():
+        raise FileNotFoundError(f"Input audio path does not exist: {input_audio_path}")
+
+    paths = sorted(
+        path
+        for path in input_audio_path.rglob("*")
+        if path.is_file() and path.suffix.lower() in _AUDIO_SUFFIXES
+    )
+    if not paths:
+        raise ValueError(f"No supported audio files found in: {input_audio_path}")
+    return paths
+
+
+def _default_output_suffix(target_channels: int) -> str:
+    """Choose the default generated-audio container for folder-mode inference."""
+    return ".flac" if int(target_channels) == 2 else ".wav"
+
+
+def _resolve_output_audio_path(
+    *,
+    input_audio_path: Path,
+    input_root_path: Path,
+    output_root_path: Path,
+    target_channels: int,
+) -> Path:
+    """Resolve one output path while preserving relative layout for folder input."""
+    if input_root_path.is_file():
+        return output_root_path
+    relative_path = input_audio_path.relative_to(input_root_path)
+    suffix = _default_output_suffix(target_channels)
+    return (output_root_path / relative_path).with_suffix(suffix)
+
+
+def _resolve_report_json_path(
+    *,
+    input_audio_path: Path,
+    input_root_path: Path,
+    report_root_path: Path | None,
+) -> Path | None:
+    """Resolve one report path while preserving relative layout for folder input."""
+    if report_root_path is None:
+        return None
+    if input_root_path.is_file():
+        return report_root_path
+    relative_path = input_audio_path.relative_to(input_root_path)
+    return (report_root_path / relative_path).with_suffix(".json")
+
+
 def _print_mix_style_presets() -> None:
     """Print available mix-style presets and their normalized knob values."""
     _safe_print("Mix-style presets:")
@@ -120,6 +201,21 @@ def _print_mix_style_presets() -> None:
         values = mix_style_preset_values(name)
         knobs = ", ".join(f"{key}={value:.2f}" for key, value in values.items())
         _safe_print(f"    {knobs}")
+
+
+def _write_report_json_atomic(report_json_path: Path, report: dict[str, Any]) -> None:
+    """Write a report JSON without exposing partially-written final files."""
+    report_json_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = report_json_path.with_name(
+        f".{report_json_path.stem}.tmp-{uuid4().hex}{report_json_path.suffix}"
+    )
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2, ensure_ascii=True)
+        tmp_path.replace(report_json_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _add_model_and_io_args(parser: argparse.ArgumentParser) -> None:
@@ -146,12 +242,15 @@ def _add_model_and_io_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--input-audio",
         default=None,
-        help="Path to mono or stereo input audio file.",
+        help="Path to mono/stereo input audio file, or a folder of audio files.",
     )
     parser.add_argument(
         "--output-audio",
         default=None,
-        help="Path to output spatial multichannel WAV file.",
+        help=(
+            "Path to output audio file. When --input-audio is a folder, this is an "
+            "output folder and the input tree is preserved."
+        ),
     )
 
 
@@ -195,7 +294,7 @@ def _add_sampler_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Step count for fixed-step solvers "
-            "(heun/euler/unipc/res6s/midpoint/rk4/adams). "
+            "(heun/euler/unipc/res6s/midpoint_rk2/rk4/adams). "
             "Ignored by adaptive solvers like dopri5. "
             "Defaults to 64."
         ),
@@ -244,9 +343,107 @@ def _add_runtime_and_reporting_args(parser: argparse.ArgumentParser) -> None:
         help="Torch device for inference (for example: cuda, cpu). Defaults to auto.",
     )
     parser.add_argument(
+        "--compile-model",
+        action="store_true",
+        help=(
+            "Compile the inference model with torch.compile after loading weights. "
+            "This is usually worth it for folder inference or long songs."
+        ),
+    )
+    parser.add_argument(
+        "--compile-mode",
+        default="default",
+        choices=COMPILE_MODE_CHOICES,
+        help="torch.compile mode used when --compile-model is set.",
+    )
+    parser.add_argument(
+        "--inference-dtype",
+        default="float32",
+        choices=INFERENCE_DTYPE_CHOICES,
+        help=(
+            "Model/input dtype for inference. Use bfloat16 on CUDA for bf16-trained "
+            "checkpoints when inference is memory-bandwidth-bound."
+        ),
+    )
+    parser.add_argument(
+        "--sdpa-backend",
+        default="auto",
+        choices=SDPA_BACKEND_CHOICES,
+        help=(
+            "Scaled-dot-product attention backend for inference. auto lets PyTorch "
+            "choose; flash/efficient/math can be used for benchmarking."
+        ),
+    )
+    parser.add_argument(
         "--show-progress",
         action="store_true",
         help="Show progress bars where supported.",
+    )
+    parser.add_argument(
+        "--dynamic-batching",
+        action="store_true",
+        help=(
+            "Use the experimental dynamic folder batching engine. This batches "
+            "fixed-window model queries across songs and currently supports "
+            "euler/heun/midpoint_rk2/res6s."
+        ),
+    )
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=4,
+        help="Maximum model-query batch size when --dynamic-batching is enabled.",
+    )
+    parser.add_argument(
+        "--cuda-graphs",
+        action="store_true",
+        help=(
+            "Use CUDA Graph replay for dynamic-batched model calls. Requires CUDA, "
+            "fixed window shapes, and --dynamic-batching."
+        ),
+    )
+    parser.add_argument(
+        "--cuda-graph-buckets",
+        default=None,
+        help=(
+            "Comma-separated CUDA Graph batch buckets, for example 1,2,4,8. "
+            "Defaults to --max-batch-size when --cuda-graphs is set."
+        ),
+    )
+    parser.add_argument(
+        "--max-active-requests",
+        type=int,
+        default=None,
+        help=(
+            "Maximum decoded/patched songs active at once for --dynamic-batching. "
+            "Defaults to --max-batch-size."
+        ),
+    )
+    parser.add_argument(
+        "--preprocess-workers",
+        type=int,
+        default=1,
+        help=(
+            "CPU worker count for dynamic folder decode/resample/patch prep. "
+            "Only used with --dynamic-batching."
+        ),
+    )
+    parser.add_argument(
+        "--postprocess-workers",
+        type=int,
+        default=1,
+        help=(
+            "CPU worker count for dynamic folder unpatch/normalization/audio writes. "
+            "Only used with --dynamic-batching."
+        ),
+    )
+    parser.add_argument(
+        "--force-overwrite",
+        action="store_true",
+        help=(
+            "Regenerate outputs even when the destination audio file already exists. "
+            "By default existing outputs are skipped so folder inference can resume."
+        ),
     )
     parser.add_argument(
         "--normalize-peak",
@@ -257,7 +454,10 @@ def _add_runtime_and_reporting_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--report-json",
         default=None,
-        help="Optional path to write an inference report JSON.",
+        help=(
+            "Optional path to write an inference report JSON. When --input-audio is "
+            "a folder, this is a report folder and the input tree is preserved."
+        ),
     )
 
 
@@ -321,34 +521,246 @@ def main() -> None:
         bool(args.normalize_peak) if args.normalize_peak is not None else False
     )
     mix_style = _parse_mix_style_json(args.mix_style_json)
-    report = run_inference(
+    input_root_path = Path(args.input_audio)
+    output_root_path = Path(args.output_audio)
+    report_root_path = Path(args.report_json) if args.report_json else None
+    input_audio_paths = _iter_input_audio_paths(input_root_path)
+    folder_mode = input_root_path.is_dir()
+    all_jobs = [
+        DynamicInferenceJob(
+            input_audio_path=input_audio_path,
+            output_audio_path=_resolve_output_audio_path(
+                input_audio_path=input_audio_path,
+                input_root_path=input_root_path,
+                output_root_path=output_root_path,
+                target_channels=config.model.target_channels,
+            ),
+            report_json_path=_resolve_report_json_path(
+                input_audio_path=input_audio_path,
+                input_root_path=input_root_path,
+                report_root_path=report_root_path,
+            ),
+        )
+        for input_audio_path in input_audio_paths
+    ]
+    force_overwrite = bool(args.force_overwrite)
+    skipped_jobs = [
+        job for job in all_jobs if job.output_audio_path.exists() and not force_overwrite
+    ]
+    jobs_to_run = [
+        job for job in all_jobs if force_overwrite or not job.output_audio_path.exists()
+    ]
+    if skipped_jobs:
+        if folder_mode:
+            _safe_print(f"Resume skip: existing_outputs={len(skipped_jobs)}")
+        else:
+            _safe_print(f"Resume skip: output exists: {skipped_jobs[0].output_audio_path}")
+            return
+    if folder_mode and not jobs_to_run:
+        _safe_print(
+            "Inference folder complete: "
+            f"generated=0 skipped={len(skipped_jobs)} errors=0 output_dir={output_root_path}"
+        )
+        if report_root_path is not None:
+            _safe_print(f"  - report_dir={report_root_path}")
+        return
+
+    if args.dynamic_batching:
+        if not folder_mode:
+            raise SystemExit("--dynamic-batching currently requires folder input.")
+        if int(args.max_batch_size) <= 0:
+            raise SystemExit("--max-batch-size must be > 0.")
+        if args.max_active_requests is not None and int(args.max_active_requests) <= 0:
+            raise SystemExit("--max-active-requests must be > 0 when provided.")
+        if int(args.preprocess_workers) <= 0:
+            raise SystemExit("--preprocess-workers must be > 0.")
+        if int(args.postprocess_workers) <= 0:
+            raise SystemExit("--postprocess-workers must be > 0.")
+    elif args.cuda_graphs:
+        raise SystemExit("--cuda-graphs requires --dynamic-batching.")
+
+    if args.dynamic_batching:
+        max_active_requests = (
+            int(args.max_active_requests)
+            if args.max_active_requests is not None
+            else int(args.max_batch_size)
+        )
+        session = build_inference_session(
+            config=config,
+            checkpoint=args.checkpoint,
+            device=args.device,
+            weights_source=cast(WeightsSource, args.weights_source),
+            compile_model=bool(args.compile_model),
+            compile_mode=str(args.compile_mode),
+            inference_dtype=cast(InferenceDTypeName, args.inference_dtype),
+        )
+        if args.compile_model:
+            _safe_print(
+                "Inference model compiled: "
+                f"mode={session.compile_mode} device={session.run_device}"
+            )
+        cuda_graph_runner = None
+        cuda_graph_buckets = None
+        if args.cuda_graphs:
+            if str(session.run_device).split(":", 1)[0] != "cuda":
+                raise SystemExit("--cuda-graphs requires a CUDA inference device.")
+            cuda_graph_buckets = parse_cuda_graph_buckets(
+                args.cuda_graph_buckets,
+                fallback_max_batch_size=int(args.max_batch_size),
+            )
+            cuda_graph_runner = CudaGraphModelRunner(
+                session.model,
+                bucket_sizes=cuda_graph_buckets,
+                clone_outputs=False,
+            )
+        _safe_print(
+            "Dynamic inference starting: "
+            f"files={len(jobs_to_run)} skipped={len(skipped_jobs)} "
+            f"max_batch_size={int(args.max_batch_size)} "
+            f"max_active_requests={max_active_requests} "
+            f"preprocess_workers={int(args.preprocess_workers)} "
+            f"postprocess_workers={int(args.postprocess_workers)} "
+            f"cuda_graphs={bool(args.cuda_graphs)}"
+            + (
+                f" cuda_graph_buckets={','.join(str(size) for size in cuda_graph_buckets)}"
+                if cuda_graph_buckets is not None
+                else ""
+            )
+        )
+        with sdpa_backend_context(cast(SDPABackendName, args.sdpa_backend)):
+            dynamic_result = run_dynamic_folder_inference(
+                session=session,
+                jobs=jobs_to_run,
+                sample_rate=sample_rate,
+                chunk_seconds=chunk_seconds,
+                overlap_seconds=overlap_seconds,
+                solver=solver,
+                solver_steps=solver_steps,
+                solver_rtol=solver_rtol,
+                solver_atol=solver_atol,
+                seed=args.seed,
+                normalize_peak=normalize_peak,
+                mix_style=mix_style,
+                mix_style_preset=args.mix_style_preset,
+                max_batch_size=int(args.max_batch_size),
+                max_active_requests=max_active_requests,
+                preprocess_workers=int(args.preprocess_workers),
+                postprocess_workers=int(args.postprocess_workers),
+                cuda_graph_runner=cuda_graph_runner,
+            )
+        report_path_by_output = {
+            str(job.output_audio_path): job.report_json_path for job in jobs_to_run
+        }
+        for report in dynamic_result.reports:
+            report_json_path = report_path_by_output.get(report["output_audio_path"])
+            if report_json_path is not None:
+                _write_report_json_atomic(report_json_path, report)
+        for input_audio_path, exc in dynamic_result.errors:
+            _safe_print(f"[infer_error] {input_audio_path}: {exc}")
+        scheduler_stats = dynamic_result.stats.scheduler
+        avg_batch_size = getattr(scheduler_stats, "average_batch_size", None)
+        if avg_batch_size is None:
+            avg_batch_size = (
+                float(scheduler_stats.model_queries) / float(scheduler_stats.model_batches)
+                if int(scheduler_stats.model_batches) > 0
+                else 0.0
+            )
+        batch_hist = " ".join(
+            f"{batch_size}:{count}"
+            for batch_size, count in sorted(
+                getattr(scheduler_stats, "batch_size_counts", {}).items()
+            )
+        )
+        _safe_print(
+            "Dynamic inference complete: "
+            f"generated={len(dynamic_result.reports)} "
+            f"skipped={len(skipped_jobs)} "
+            f"errors={len(dynamic_result.errors)} output_dir={output_root_path}"
+        )
+        _safe_print(
+            "  - scheduler="
+            f"batches={scheduler_stats.model_batches} "
+            f"queries={scheduler_stats.model_queries} "
+            f"avg_batch={float(avg_batch_size):.2f} "
+            f"max_batch={scheduler_stats.max_observed_batch_size} "
+            f"windows={scheduler_stats.completed_controllers} "
+            f"batch_hist=[{batch_hist}]"
+        )
+        if report_root_path is not None:
+            _safe_print(f"  - report_dir={report_root_path}")
+        if dynamic_result.errors:
+            raise SystemExit(1)
+        return
+
+    session = build_inference_session(
         config=config,
         checkpoint=args.checkpoint,
-        input_audio_path=args.input_audio,
-        output_audio_path=args.output_audio,
-        sample_rate=sample_rate,
-        chunk_seconds=chunk_seconds,
-        overlap_seconds=overlap_seconds,
-        solver=solver,
-        solver_steps=solver_steps,
-        solver_rtol=solver_rtol,
-        solver_atol=solver_atol,
-        seed=args.seed,
         device=args.device,
-        show_progress=args.show_progress,
-        normalize_peak=normalize_peak,
-        mix_style=mix_style,
-        mix_style_preset=args.mix_style_preset,
         weights_source=cast(WeightsSource, args.weights_source),
+        compile_model=bool(args.compile_model),
+        compile_mode=str(args.compile_mode),
+        inference_dtype=cast(InferenceDTypeName, args.inference_dtype),
     )
-    report_values = dict(report)
+    if args.compile_model:
+        _safe_print(
+            "Inference model compiled: "
+            f"mode={session.compile_mode} device={session.run_device}"
+        )
+    reports = []
+    errors: list[tuple[Path, Exception]] = []
+    total_inputs = len(jobs_to_run)
+    with sdpa_backend_context(cast(SDPABackendName, args.sdpa_backend)):
+        for index, job in enumerate(jobs_to_run, start=1):
+            input_audio_path = job.input_audio_path
+            output_audio_path = job.output_audio_path
+            report_json_path = job.report_json_path
+            if folder_mode:
+                _safe_print(
+                    f"[{index}/{total_inputs}] {input_audio_path} -> {output_audio_path}"
+                )
+            try:
+                report = run_inference_with_session(
+                    session=session,
+                    input_audio_path=input_audio_path,
+                    output_audio_path=output_audio_path,
+                    sample_rate=sample_rate,
+                    chunk_seconds=chunk_seconds,
+                    overlap_seconds=overlap_seconds,
+                    solver=solver,
+                    solver_steps=solver_steps,
+                    solver_rtol=solver_rtol,
+                    solver_atol=solver_atol,
+                    seed=args.seed,
+                    show_progress=args.show_progress,
+                    normalize_peak=normalize_peak,
+                    mix_style=mix_style,
+                    mix_style_preset=args.mix_style_preset,
+                )
+            except Exception as exc:
+                errors.append((input_audio_path, exc))
+                _safe_print(f"[infer_error] {input_audio_path}: {exc}")
+                continue
 
-    if args.report_json:
-        report_path = Path(args.report_json)
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump(report, handle, indent=2, ensure_ascii=True)
+            reports.append(report)
+            if report_json_path is not None:
+                _write_report_json_atomic(report_json_path, report)
 
+    if folder_mode:
+        _safe_print(
+            "Inference folder complete: "
+            f"generated={len(reports)} skipped={len(skipped_jobs)} "
+            f"errors={len(errors)} output_dir={output_root_path}"
+        )
+        if report_root_path is not None:
+            _safe_print(f"  - report_dir={report_root_path}")
+        if errors:
+            raise SystemExit(1)
+        return
+
+    if errors:
+        raise SystemExit(1)
+
+    report_values = dict(reports[0])
     _safe_print("Inference complete:")
     for key in [
         "config_path",
@@ -369,14 +781,17 @@ def main() -> None:
         "seed",
         "mix_style_preset",
         "mix_style",
+        "compiled",
+        "compile_mode",
+        "inference_dtype",
     ]:
         if key == "config_path":
             _safe_print(f"  - config_path={resolved_config_path}")
         else:
             _safe_print(f"  - {key}={report_values[key]}")
 
-    if args.report_json:
-        _safe_print(f"  - report_json={report_path}")
+    if report_root_path is not None:
+        _safe_print(f"  - report_json={report_root_path}")
 
 
 if __name__ == "__main__":

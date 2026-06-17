@@ -168,6 +168,11 @@ def test_resolve_inference_solver_accepts_res6s_aliases() -> None:
     assert _resolve_inference_solver(requested_solver="res_6s") == "res6s"
 
 
+@pytest.mark.parametrize("solver", ["midpoint", "midpoint_rk2", "midpoint-rk2", "rk2"])
+def test_resolve_inference_solver_accepts_midpoint_rk2_aliases(solver: str) -> None:
+    assert _resolve_inference_solver(requested_solver=solver) == "midpoint_rk2"
+
+
 def test_resolve_inference_mix_style_uses_headphone_active_order() -> None:
     mix_style = _resolve_inference_mix_style(
         raw_mix_style=None,
@@ -306,8 +311,130 @@ def test_run_inference_reports_amplitude_lift_gain(tmp_path: Path) -> None:
     )
 
     assert report["amplitude_lift_enabled"] is True
+    assert report["amplitude_lift_mode"] == "rms"
     assert report["amplitude_lift_reference"] == "source"
     assert report["amplitude_lift_target_rms"] == 0.5
     assert report["amplitude_lift_scale"] == 2.0
     assert report["amplitude_lift_clip_value"] == 4.0
     assert report["amplitude_lift_gain"] == pytest.approx(2.0)
+
+
+def test_run_inference_reports_scale_only_amplitude_lift(tmp_path: Path) -> None:
+    config = _tiny_config(tmp_path)
+    config.data.amplitude_lift_enabled = True
+    config.data.amplitude_lift_mode = "scale"
+    config.data.amplitude_lift_reference = "source"
+    config.data.amplitude_lift_scale = 3.0
+    config.data.amplitude_lift_clip_value = 0.1
+
+    model = SpatialDiT(
+        target_channels=config.model.target_channels,
+        cond_channels=config.model.cond_channels,
+        patch_size=config.model.patch_size,
+        hidden_dim=config.model.hidden_dim,
+        num_layers=config.model.num_layers,
+        num_heads=config.model.num_heads,
+        mlp_ratio=config.model.mlp_ratio,
+        dropout=config.model.dropout,
+        timestep_embed_dim=config.model.timestep_embed_dim,
+        timestep_scale=config.model.timestep_scale,
+        max_period=config.model.max_period,
+        num_memory_tokens=config.model.num_memory_tokens,
+    )
+    checkpoint_path = tmp_path / "model.pt"
+    torch.save({"model_state_dict": model.state_dict()}, checkpoint_path)
+
+    input_audio_path = tmp_path / "input.wav"
+    output_audio_path = tmp_path / "output.wav"
+    write_audio_channels_first(
+        audio_path=input_audio_path,
+        audio=torch.full((2, 24), 0.25),
+        sample_rate=config.data.sample_rate,
+    )
+
+    report = run_inference(
+        config=config,
+        checkpoint=checkpoint_path,
+        input_audio_path=input_audio_path,
+        output_audio_path=output_audio_path,
+        sample_rate=config.data.sample_rate,
+        chunk_seconds=0.002,
+        overlap_seconds=0.0,
+        solver="euler",
+        solver_steps=1,
+        solver_rtol=1e-5,
+        solver_atol=1e-5,
+        seed=123,
+        device="cpu",
+        show_progress=False,
+        normalize_peak=False,
+        weights_source="student",
+    )
+
+    assert report["amplitude_lift_enabled"] is True
+    assert report["amplitude_lift_mode"] == "scale"
+    assert report["amplitude_lift_scale"] == 3.0
+    assert report["amplitude_lift_clip_value"] == 0.1
+    assert report["amplitude_lift_gain"] == pytest.approx(1.0)
+
+
+def test_run_inference_supports_wavflow_amplitude_lift(tmp_path: Path) -> None:
+    config = _tiny_config(tmp_path)
+    config.data.amplitude_lift_enabled = True
+    config.data.amplitude_lift_mode = "wavflow"
+    config.data.amplitude_lift_reference = "target"
+    config.data.amplitude_lift_target_rms = 0.33
+    config.data.amplitude_lift_scale = 3.0
+    config.data.amplitude_lift_output_lufs = -23.0
+
+    model = SpatialDiT(
+        target_channels=config.model.target_channels,
+        cond_channels=config.model.cond_channels,
+        patch_size=config.model.patch_size,
+        hidden_dim=config.model.hidden_dim,
+        num_layers=config.model.num_layers,
+        num_heads=config.model.num_heads,
+        mlp_ratio=config.model.mlp_ratio,
+        dropout=config.model.dropout,
+        timestep_embed_dim=config.model.timestep_embed_dim,
+        timestep_scale=config.model.timestep_scale,
+        max_period=config.model.max_period,
+        num_memory_tokens=config.model.num_memory_tokens,
+    )
+    checkpoint_path = tmp_path / "model.pt"
+    torch.save({"model_state_dict": model.state_dict()}, checkpoint_path)
+
+    input_audio_path = tmp_path / "input.wav"
+    output_audio_path = tmp_path / "output.wav"
+    write_audio_channels_first(
+        audio_path=input_audio_path,
+        audio=torch.full((2, 24), 0.25),
+        sample_rate=config.data.sample_rate,
+    )
+
+    report = run_inference(
+        config=config,
+        checkpoint=checkpoint_path,
+        input_audio_path=input_audio_path,
+        output_audio_path=output_audio_path,
+        sample_rate=config.data.sample_rate,
+        chunk_seconds=0.002,
+        overlap_seconds=0.0,
+        solver="euler",
+        solver_steps=1,
+        solver_rtol=1e-5,
+        solver_atol=1e-5,
+        seed=123,
+        device="cpu",
+        show_progress=False,
+        normalize_peak=False,
+        weights_source="student",
+    )
+
+    assert report["amplitude_lift_enabled"] is True
+    assert report["amplitude_lift_mode"] == "wavflow"
+    assert report["amplitude_lift_reference"] == "target"
+    assert report["amplitude_lift_target_rms"] == 0.33
+    assert report["amplitude_lift_scale"] == 3.0
+    assert report["amplitude_lift_output_lufs"] == -23.0
+    assert report["amplitude_lift_gain"] == pytest.approx(3.96)

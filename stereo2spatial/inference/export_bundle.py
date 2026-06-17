@@ -269,9 +269,7 @@ def build_train_config_from_bundle_payload(
         num_memory_tokens=int(model_raw.get("num_memory_tokens", 0)),
         mix_style_dim=int(model_raw.get("mix_style_dim", 0)),
         waveform_level_depth=int(model_raw.get("waveform_level_depth", 0)),
-        waveform_micro_patch_size=int(
-            model_raw.get("waveform_micro_patch_size", 16)
-        ),
+        waveform_micro_patch_size=int(model_raw.get("waveform_micro_patch_size", 16)),
         waveform_hidden_dim=int(model_raw.get("waveform_hidden_dim", 16)),
         waveform_num_heads=(
             int(model_raw["waveform_num_heads"])
@@ -279,9 +277,11 @@ def build_train_config_from_bundle_payload(
             else None
         ),
         waveform_mlp_ratio=float(model_raw.get("waveform_mlp_ratio", 2.0)),
-        activation_checkpointing=bool(
-            model_raw.get("activation_checkpointing", False)
-        ),
+        final_output_kernel_size=int(model_raw.get("final_output_kernel_size", 7)),
+        final_output_zero_init=bool(model_raw.get("final_output_zero_init", False)),
+        rope_enabled=bool(model_raw.get("rope_enabled", True)),
+        rope_theta=float(model_raw.get("rope_theta", 10000.0)),
+        activation_checkpointing=bool(model_raw.get("activation_checkpointing", False)),
     )
 
     data = DataConfig(
@@ -292,6 +292,11 @@ def build_train_config_from_bundle_payload(
         sequence_seconds=DEFAULT_BUNDLE_CHUNK_SECONDS,
         stride_seconds=DEFAULT_BUNDLE_CHUNK_SECONDS,
         sample_rate=int(audio_raw["sample_rate"]),
+        training_sample_rate=(
+            None
+            if data_raw.get("training_sample_rate") is None
+            else int(data_raw.get("training_sample_rate"))
+        ),
         mono_probability=0.0,
         downmix_probability=0.0,
         cache_size=0,
@@ -303,13 +308,28 @@ def build_train_config_from_bundle_payload(
         persistent_workers=False,
         drop_last=False,
         amplitude_lift_enabled=bool(data_raw.get("amplitude_lift_enabled", False)),
-        amplitude_lift_reference=str(data_raw.get("amplitude_lift_reference", "source")),
-        amplitude_lift_target_rms=float(data_raw.get("amplitude_lift_target_rms", 0.33)),
+        amplitude_lift_mode=str(data_raw.get("amplitude_lift_mode", "rms")),
+        amplitude_lift_reference=str(
+            data_raw.get("amplitude_lift_reference", "source")
+        ),
+        amplitude_lift_target_rms=float(
+            data_raw.get("amplitude_lift_target_rms", 0.33)
+        ),
         amplitude_lift_scale=float(data_raw.get("amplitude_lift_scale", 3.0)),
         amplitude_lift_clip_value=(
             None
             if data_raw.get("amplitude_lift_clip_value", 4.0) is None
             else float(data_raw.get("amplitude_lift_clip_value", 4.0))
+        ),
+        amplitude_lift_waveform_clamp=bool(
+            data_raw.get("amplitude_lift_waveform_clamp", True)
+        ),
+        amplitude_lift_peak_limit=float(data_raw.get("amplitude_lift_peak_limit", 1.0)),
+        amplitude_lift_peak_rescale_min_rms=float(
+            data_raw.get("amplitude_lift_peak_rescale_min_rms", 0.3)
+        ),
+        amplitude_lift_output_lufs=float(
+            data_raw.get("amplitude_lift_output_lufs", -23.0)
         ),
         amplitude_lift_eps=float(data_raw.get("amplitude_lift_eps", 1.0e-8)),
     )
@@ -429,6 +449,14 @@ def _build_runtime_model_config(model_config: dict[str, Any]) -> dict[str, Any]:
             else None
         ),
         "waveform_mlp_ratio": float(model_config.get("waveform_mlp_ratio", 2.0)),
+        "final_output_kernel_size": int(
+            model_config.get("final_output_kernel_size", 7)
+        ),
+        "final_output_zero_init": bool(
+            model_config.get("final_output_zero_init", False)
+        ),
+        "rope_enabled": bool(model_config.get("rope_enabled", True)),
+        "rope_theta": float(model_config.get("rope_theta", 10000.0)),
         "activation_checkpointing": bool(
             model_config.get("activation_checkpointing", False)
         ),
@@ -453,6 +481,8 @@ def _build_runtime_config(
         "amplitude_lift_enabled": bool(
             data_config.get("amplitude_lift_enabled", False)
         ),
+        "training_sample_rate": data_config.get("training_sample_rate"),
+        "amplitude_lift_mode": str(data_config.get("amplitude_lift_mode", "rms")),
         "amplitude_lift_reference": str(
             data_config.get("amplitude_lift_reference", "source")
         ),
@@ -463,6 +493,18 @@ def _build_runtime_config(
         "amplitude_lift_clip_value": data_config.get(
             "amplitude_lift_clip_value",
             4.0,
+        ),
+        "amplitude_lift_waveform_clamp": bool(
+            data_config.get("amplitude_lift_waveform_clamp", True)
+        ),
+        "amplitude_lift_peak_limit": float(
+            data_config.get("amplitude_lift_peak_limit", 1.0)
+        ),
+        "amplitude_lift_peak_rescale_min_rms": float(
+            data_config.get("amplitude_lift_peak_rescale_min_rms", 0.3)
+        ),
+        "amplitude_lift_output_lufs": float(
+            data_config.get("amplitude_lift_output_lufs", -23.0)
         ),
         "amplitude_lift_eps": float(data_config.get("amplitude_lift_eps", 1.0e-8)),
         **model_config,
