@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import random
 from collections import OrderedDict
+from dataclasses import replace
 from multiprocessing import Value
 from os import PathLike
 from pathlib import Path
@@ -13,8 +15,11 @@ import torch
 from torch.utils.data import Dataset
 
 from stereo2spatial.common.amplitude_lift import (
+    amplitude_lift_log_gain,
     apply_amplitude_lift,
-    compute_shared_rms_gain,
+    resolve_amplitude_lift_gain,
+    wavflow_source_transform,
+    wavflow_target_transform,
 )
 from stereo2spatial.common.codec_augmentation import codec_roundtrip
 from stereo2spatial.common.mix_style import DEFAULT_MIX_STYLE_VECTOR
@@ -43,6 +48,8 @@ from .dataset_io import (
     SOURCE_MONO_SIGNAL_FILENAME,
     SOURCE_STEREO_SIGNAL_FILENAME,
     TARGET_SIGNAL_FILENAME,
+    _filter_songs_by_min_source_rms,
+    _filter_songs_by_sample_exclusion,
     _patch_audio,
     _slice_with_right_pad,
 )
@@ -101,18 +108,31 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
         cache_size: int,
         shuffle_segments_within_epoch: bool,
         seed: int,
+        sample_exclusion_path: str
+        | PathLike[str]
+        | list[str | PathLike[str]]
+        | None = None,
         shuffle_segments_within_song: bool = True,
         materialize_cached_signals: bool = False,
         sequence_seconds: float | None = None,
         stride_seconds: float | None = None,
+        sample_rate: int = 48_000,
+        training_sample_rate: int | None = None,
         sequence_mode: str = "strided_crops",
         full_song_max_seconds: float | None = None,
         amplitude_lift_enabled: bool = False,
+        amplitude_lift_mode: str = "rms",
         amplitude_lift_reference: str = "source",
         amplitude_lift_target_rms: float = 0.33,
         amplitude_lift_scale: float = 3.0,
         amplitude_lift_clip_value: float | None = 4.0,
+        amplitude_lift_gain_power: float = 1.0,
+        amplitude_lift_gain_min_value: float | None = None,
+        amplitude_lift_waveform_clamp: bool = True,
+        amplitude_lift_peak_limit: float = 1.0,
+        amplitude_lift_peak_rescale_min_rms: float = 0.3,
         amplitude_lift_eps: float = 1.0e-8,
+        min_source_rms: float | None = None,
         source_resample_aug_enabled: bool = False,
         source_resample_aug_probability: float = 0.0,
         source_resample_aug_rates: list[int] | None = None,
@@ -148,14 +168,20 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
         self.shuffle_segments_within_epoch = bool(shuffle_segments_within_epoch)
         self.shuffle_segments_within_song = bool(shuffle_segments_within_song)
         self.materialize_cached_signals = bool(materialize_cached_signals)
+        self.sample_exclusion_path = sample_exclusion_path
         self.seed = int(seed)
         self.sequence_mode = str(sequence_mode).strip().lower()
+        self.sample_rate = int(sample_rate)
+        self.training_sample_rate = (
+            self.sample_rate
+            if training_sample_rate is None
+            else int(training_sample_rate)
+        )
         self.full_song_max_seconds = (
-            float(full_song_max_seconds)
-            if full_song_max_seconds is not None
-            else None
+            float(full_song_max_seconds) if full_song_max_seconds is not None else None
         )
         self.amplitude_lift_enabled = bool(amplitude_lift_enabled)
+        self.amplitude_lift_mode = str(amplitude_lift_mode).strip().lower()
         self.amplitude_lift_reference = str(amplitude_lift_reference).strip().lower()
         self.amplitude_lift_target_rms = float(amplitude_lift_target_rms)
         self.amplitude_lift_scale = float(amplitude_lift_scale)
@@ -164,7 +190,19 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             if amplitude_lift_clip_value is None
             else float(amplitude_lift_clip_value)
         )
+        self.amplitude_lift_gain_power = float(amplitude_lift_gain_power)
+        self.amplitude_lift_gain_min_value = (
+            None
+            if amplitude_lift_gain_min_value is None
+            else float(amplitude_lift_gain_min_value)
+        )
+        self.amplitude_lift_waveform_clamp = bool(amplitude_lift_waveform_clamp)
+        self.amplitude_lift_peak_limit = float(amplitude_lift_peak_limit)
+        self.amplitude_lift_peak_rescale_min_rms = float(
+            amplitude_lift_peak_rescale_min_rms
+        )
         self.amplitude_lift_eps = float(amplitude_lift_eps)
+        self.min_source_rms = None if min_source_rms is None else float(min_source_rms)
         self.source_resample_aug_enabled = bool(source_resample_aug_enabled)
         self.source_resample_aug_probability = float(source_resample_aug_probability)
         self.source_resample_aug_rates = (
@@ -215,9 +253,7 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             else None
         )
         self.source_codec_aug_align_max_lag = int(source_codec_aug_align_max_lag)
-        self.source_codec_aug_timeout_seconds = float(
-            source_codec_aug_timeout_seconds
-        )
+        self.source_codec_aug_timeout_seconds = float(source_codec_aug_timeout_seconds)
         self._global_step_value = Value("q", 0, lock=False)
 
         self.sequence_seconds = (
@@ -247,6 +283,12 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             raise ValueError("patch_size must be > 0")
         if self.sequence_seconds <= 0:
             raise ValueError("sequence_seconds must be > 0")
+        if self.sample_rate <= 0:
+            raise ValueError("sample_rate must be > 0")
+        if self.training_sample_rate <= 0:
+            raise ValueError("training_sample_rate must be > 0")
+        if self.training_sample_rate > self.sample_rate:
+            raise ValueError("training_sample_rate must be <= sample_rate")
         if self.stride_seconds <= 0:
             raise ValueError("stride_seconds must be > 0")
         if self.full_song_max_seconds is not None and self.full_song_max_seconds <= 0:
@@ -261,6 +303,8 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             raise ValueError("mono_probability + downmix_probability must be <= 1")
         if self.amplitude_lift_reference not in {"source", "target"}:
             raise ValueError("amplitude_lift_reference must be one of: source, target")
+        if self.amplitude_lift_mode not in {"rms", "scale", "wavflow"}:
+            raise ValueError("amplitude_lift_mode must be one of: rms, scale, wavflow")
         if self.amplitude_lift_target_rms <= 0:
             raise ValueError("amplitude_lift_target_rms must be > 0")
         if self.amplitude_lift_scale <= 0:
@@ -272,6 +316,12 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             raise ValueError("amplitude_lift_clip_value must be > 0 when set")
         if self.amplitude_lift_eps <= 0:
             raise ValueError("amplitude_lift_eps must be > 0")
+        if self.amplitude_lift_peak_limit <= 0:
+            raise ValueError("amplitude_lift_peak_limit must be > 0")
+        if self.amplitude_lift_peak_rescale_min_rms <= 0:
+            raise ValueError("amplitude_lift_peak_rescale_min_rms must be > 0")
+        if self.min_source_rms is not None and not 0 < self.min_source_rms < 1:
+            raise ValueError("min_source_rms must be in (0, 1) when set")
         if not 0 <= self.source_resample_aug_probability <= 1:
             raise ValueError("source_resample_aug_probability must be in [0, 1]")
         if self.source_resample_aug_sample_rate <= 0:
@@ -335,7 +385,14 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
         self._songs = self._load_manifest_records()
         if not self._songs:
             manifests = ", ".join(str(path) for path in self.manifest_paths)
-            raise RuntimeError(f"No samples found from manifest(s): {manifests}")
+            detail = (
+                f" (after min_source_rms={self.min_source_rms} filtering)"
+                if self.min_source_rms is not None
+                else ""
+            )
+            raise RuntimeError(
+                f"No samples found from manifest(s){detail}: {manifests}"
+            )
 
         self.resolved_patch_fps = self._resolve_patch_fps()
         self.segment_frames = max(
@@ -408,7 +465,46 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
                     patch_size=self.patch_size,
                 )
             )
+        songs = [self._song_for_training_sample_rate(song) for song in songs]
+        songs, excluded = _filter_songs_by_sample_exclusion(
+            songs,
+            sample_exclusion_path=self.sample_exclusion_path,
+        )
+        if self.sample_exclusion_path is not None:
+            print(
+                "[sample_exclusion] "
+                f"files={self.sample_exclusion_path} kept={len(songs)} dropped={excluded}"
+            )
+        songs, dropped, missing = _filter_songs_by_min_source_rms(
+            songs,
+            min_source_rms=self.min_source_rms,
+        )
+        if self.min_source_rms is not None:
+            message = (
+                f"[min_source_rms] threshold={self.min_source_rms} "
+                f"kept={len(songs)} dropped={dropped}"
+            )
+            if missing > 0:
+                message += f" kept_without_rms_metadata={missing}"
+            print(message)
         return songs
+
+    def _song_for_training_sample_rate(self, song: SongRecord) -> SongRecord:
+        """Return song metadata with frame counts scaled to training sample rate."""
+        source_rate = int(song.sample_rate or self.sample_rate)
+        if self.training_sample_rate == source_rate:
+            return song
+        ratio = float(self.training_sample_rate) / float(source_rate)
+        if song.input_samples is not None and song.input_samples > 0:
+            resampled_samples = max(1, int(round(int(song.input_samples) * ratio)))
+            target_frames = max(1, math.ceil(resampled_samples / self.patch_size))
+            return replace(
+                song,
+                target_frames=target_frames,
+                input_samples=resampled_samples,
+            )
+        target_frames = max(1, int(math.floor(float(song.target_frames) * ratio)))
+        return replace(song, target_frames=target_frames)
 
     def _resolve_patch_fps(self) -> float:
         """Resolve signal FPS from config value (numeric or ``auto``)."""
@@ -471,16 +567,93 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             sample_dir,
             patch_size=self.patch_size,
             amplitude_lift_enabled=self.amplitude_lift_enabled,
+            amplitude_lift_mode=self.amplitude_lift_mode,
             amplitude_lift_reference=self.amplitude_lift_reference,
             amplitude_lift_target_rms=self.amplitude_lift_target_rms,
             amplitude_lift_scale=self.amplitude_lift_scale,
             amplitude_lift_clip_value=self.amplitude_lift_clip_value,
             amplitude_lift_eps=self.amplitude_lift_eps,
+            amplitude_lift_gain_power=self.amplitude_lift_gain_power,
+            amplitude_lift_gain_min_value=self.amplitude_lift_gain_min_value,
+            amplitude_lift_waveform_clamp=self.amplitude_lift_waveform_clamp,
+            amplitude_lift_peak_limit=self.amplitude_lift_peak_limit,
+            amplitude_lift_peak_rescale_min_rms=(
+                self.amplitude_lift_peak_rescale_min_rms
+            ),
         )
 
-    def _load_raw_signals_from_sample(self, sample_dir: Path) -> dict[str, torch.Tensor]:
+    def _load_raw_signals_from_sample(
+        self, sample_dir: Path
+    ) -> dict[str, torch.Tensor]:
         """Load one sample's raw signal tensors without patching full songs."""
         return _io_load_raw_signals_from_sample(sample_dir)
+
+    def _apply_wavflow_lift_to_signals(
+        self,
+        signals: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Apply WavFlow-style target lifting to full-song target-side signals."""
+        if "target_signal" not in signals:
+            raise KeyError("WavFlow amplitude lifting requires target_signal")
+        lifted = dict(signals)
+        lifted["target_signal"], _target_gain = wavflow_target_transform(
+            signals["target_signal"],
+            target_rms=self.amplitude_lift_target_rms,
+            scale=self.amplitude_lift_scale,
+            peak_limit=self.amplitude_lift_peak_limit,
+            peak_rescale_min_rms=self.amplitude_lift_peak_rescale_min_rms,
+            waveform_clamp=self.amplitude_lift_waveform_clamp,
+            eps=self.amplitude_lift_eps,
+        )
+        if "source_downmix_signal" in signals:
+            lifted["source_downmix_signal"], _downmix_gain = wavflow_target_transform(
+                signals["source_downmix_signal"],
+                target_rms=self.amplitude_lift_target_rms,
+                scale=self.amplitude_lift_scale,
+                peak_limit=self.amplitude_lift_peak_limit,
+                peak_rescale_min_rms=self.amplitude_lift_peak_rescale_min_rms,
+                waveform_clamp=self.amplitude_lift_waveform_clamp,
+                eps=self.amplitude_lift_eps,
+            )
+
+        for key in ("source_stereo_signal", "source_mono_signal"):
+            if key not in signals:
+                continue
+            _lifted_source, source_gain = wavflow_source_transform(
+                signals[key],
+                target_rms=self.amplitude_lift_target_rms,
+                scale=self.amplitude_lift_scale,
+                peak_limit=self.amplitude_lift_peak_limit,
+                eps=self.amplitude_lift_eps,
+            )
+            lifted[f"_wavflow_gain_{key}"] = source_gain.detach().cpu()
+
+        return lifted
+
+    def _maybe_resample_training_signals(
+        self,
+        signals: dict[str, torch.Tensor],
+        *,
+        source_rate: int,
+    ) -> dict[str, torch.Tensor]:
+        """Optionally resample full-song waveform signals to training sample rate."""
+        if self.training_sample_rate == int(source_rate):
+            return signals
+        if torchaudio is None:
+            raise RuntimeError(
+                "data.training_sample_rate requires torchaudio for resampling."
+            )
+        out: dict[str, torch.Tensor] = {}
+        for key, value in signals.items():
+            if key.startswith("_"):
+                out[key] = value
+                continue
+            out[key] = torchaudio.functional.resample(
+                value.float(),
+                orig_freq=int(source_rate),
+                new_freq=int(self.training_sample_rate),
+            ).contiguous()
+        return out
 
     def _get_song_signals(self, song: SongRecord) -> dict[str, torch.Tensor]:
         """Return raw song signal tensors, using an LRU cache when enabled."""
@@ -490,6 +663,12 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             return value
 
         signals = self._load_raw_signals_from_sample(song.sample_dir)
+        if self.amplitude_lift_enabled and self.amplitude_lift_mode == "wavflow":
+            signals = self._apply_wavflow_lift_to_signals(signals)
+        signals = self._maybe_resample_training_signals(
+            signals,
+            source_rate=int(song.sample_rate or self.sample_rate),
+        )
         if self.cache_size > 0:
             if self.materialize_cached_signals:
                 signals = self._materialize_signals(signals)
@@ -525,24 +704,33 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
         """Compute the shared full-song gain used for chunk-local amplitude lift."""
         if not self.amplitude_lift_enabled:
             return None
+        if self.amplitude_lift_mode == "wavflow":
+            return None
         reference_key = (
             "target_signal"
             if self.amplitude_lift_reference == "target"
             else "source_stereo_signal"
         )
+        if self.amplitude_lift_mode == "scale":
+            return torch.ones((1, 1), dtype=torch.float32)
         if song.signal_rms is not None and reference_key in song.signal_rms:
-            rms = torch.tensor(float(song.signal_rms[reference_key]), dtype=torch.float32)
+            rms = torch.tensor(
+                float(song.signal_rms[reference_key]), dtype=torch.float32
+            )
             return torch.as_tensor(
                 self.amplitude_lift_target_rms,
                 dtype=torch.float32,
             ) / rms.clamp_min(float(self.amplitude_lift_eps))
         if reference_key not in signals:
-            raise KeyError(f"Amplitude lifting reference signal missing: {reference_key}")
+            raise KeyError(
+                f"Amplitude lifting reference signal missing: {reference_key}"
+            )
         reference = signals[reference_key]
         if reference.dim() != 2:
             return None
-        return compute_shared_rms_gain(
+        return resolve_amplitude_lift_gain(
             reference.float(),
+            mode=self.amplitude_lift_mode,
             target_rms=self.amplitude_lift_target_rms,
             eps=self.amplitude_lift_eps,
         )
@@ -556,12 +744,66 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
         """Apply model-space amplitude lift to one sliced waveform chunk."""
         if gain is None:
             return chunk.float()
+        if self.amplitude_lift_mode == "wavflow":
+            return chunk.float()
         return apply_amplitude_lift(
             chunk.float(),
             gain=gain,
             scale=self.amplitude_lift_scale,
-            clip_value=self.amplitude_lift_clip_value,
+            clip_value=(
+                None
+                if self.amplitude_lift_mode == "scale"
+                else self.amplitude_lift_clip_value
+            ),
+            gain_power=self.amplitude_lift_gain_power,
+            gain_min_value=self.amplitude_lift_gain_min_value,
         )
+
+    def _maybe_lift_conditioning_chunk(
+        self,
+        chunk: torch.Tensor,
+        *,
+        gain: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Apply conditioning-side WavFlow lift after source augmentations."""
+        if not self.amplitude_lift_enabled or self.amplitude_lift_mode != "wavflow":
+            return chunk.float(), None
+        if gain is not None:
+            return chunk.float() * gain.to(dtype=torch.float32), gain
+        lifted, gain = wavflow_source_transform(
+            chunk.float(),
+            target_rms=self.amplitude_lift_target_rms,
+            scale=self.amplitude_lift_scale,
+            peak_limit=self.amplitude_lift_peak_limit,
+            eps=self.amplitude_lift_eps,
+        )
+        return lifted, gain
+
+    def _amplitude_lift_log_gain_tensor(
+        self, gain: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        """Return a scalar [1] log-gain tensor for model conditioning, or None."""
+        if gain is None:
+            return None
+        if self.amplitude_lift_mode == "wavflow":
+            return (
+                torch.log(gain.float().clamp_min(self.amplitude_lift_eps))
+                .flatten()[:1]
+                .contiguous()
+            )
+        log_g = amplitude_lift_log_gain(
+            gain,
+            scale=self.amplitude_lift_scale,
+            gain_power=self.amplitude_lift_gain_power,
+            gain_clip_value=(
+                None
+                if self.amplitude_lift_mode == "scale"
+                else self.amplitude_lift_clip_value
+            ),
+            gain_min_value=self.amplitude_lift_gain_min_value,
+            eps=self.amplitude_lift_eps,
+        )
+        return log_g.flatten()[:1].contiguous()
 
     def _slice_waveform_with_right_pad(
         self,
@@ -609,7 +851,9 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
 
     def _patch_waveform_chunk(self, signal: torch.Tensor, name: str) -> torch.Tensor:
         """Patch a pre-windowed raw waveform chunk."""
-        return _patch_audio(signal.float().contiguous(), patch_size=self.patch_size, name=name)
+        return _patch_audio(
+            signal.float().contiguous(), patch_size=self.patch_size, name=name
+        )
 
     def _augmentation_rng(self, index: int, *, stream: int = 0) -> random.Random:
         """Return deterministic item-local RNG for stochastic audio augmentations."""
@@ -801,6 +1045,7 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
                 "Set downmix_probability=0.0 for direct stereo/headphone datasets."
             )
         cond_signal = signals[cond_key]
+        source_lift_gain: torch.Tensor | None = None
 
         if self.sequence_mode == "full_song":
             if target_signal.dim() != 2 or cond_signal.dim() != 2:
@@ -864,6 +1109,10 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
                 }
                 if target_downmix_chunk is not None:
                     sample["target_downmix_signal"] = target_downmix_chunk
+                if self.amplitude_lift_enabled:
+                    sample["amplitude_lift_log_gain"] = torch.zeros(
+                        1, dtype=torch.float32
+                    )
                 return sample
 
             lift_gain = self._amplitude_lift_gain(song=song, signals=signals)
@@ -871,7 +1120,9 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             if target_downmix_signal is not None:
                 frame_lengths.append(target_downmix_signal.shape[-1])
             max_total_samples = min(frame_lengths)
-            max_total_frames = max(1, (max_total_samples + self.patch_size - 1) // self.patch_size)
+            max_total_frames = max(
+                1, (max_total_samples + self.patch_size - 1) // self.patch_size
+            )
             total_frames = min(int(segment.num_valid_frames), int(max_total_frames))
             if total_frames <= 0:
                 raise RuntimeError(
@@ -912,8 +1163,14 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
                 self._maybe_lift_chunk(target_waveform, gain=lift_gain),
                 "target_signal",
             )
+            cond_waveform = self._maybe_lift_chunk(cond_waveform, gain=lift_gain)
+            if cond_key in {"source_stereo_signal", "source_mono_signal"}:
+                cond_waveform, source_lift_gain = self._maybe_lift_conditioning_chunk(
+                    cond_waveform,
+                    gain=signals.get(f"_wavflow_gain_{cond_key}"),
+                )
             cond_chunk = self._patch_waveform_chunk(
-                self._maybe_lift_chunk(cond_waveform, gain=lift_gain),
+                cond_waveform,
                 "cond_signal",
             )
             target_downmix_chunk = (
@@ -941,7 +1198,7 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
                 raise RuntimeError(
                     "Invalid full-song chunk: "
                     f"target={tuple(target_chunk.shape)} cond={tuple(cond_chunk.shape)}"
-            )
+                )
             target_chunk = target_chunk[..., :valid_frames]
             cond_chunk = cond_chunk[..., :valid_frames]
             if target_downmix_chunk is not None:
@@ -960,8 +1217,14 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             }
             if target_downmix_chunk is not None:
                 sample["target_downmix_signal"] = target_downmix_chunk
+            log_gain_t = self._amplitude_lift_log_gain_tensor(
+                lift_gain if lift_gain is not None else source_lift_gain
+            )
+            if log_gain_t is not None:
+                sample["amplitude_lift_log_gain"] = log_gain_t
             return sample
 
+        lift_gain: torch.Tensor | None = None
         if target_signal.dim() != 2 or cond_signal.dim() != 2:
             full_signals = self._load_signals_from_sample(song.sample_dir)
             target_signal = full_signals["target_signal"]
@@ -1015,20 +1278,27 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
                 self._maybe_lift_chunk(target_waveform, gain=lift_gain),
                 "target_signal",
             )
+            cond_waveform = self._maybe_lift_chunk(cond_waveform, gain=lift_gain)
+            if cond_key in {"source_stereo_signal", "source_mono_signal"}:
+                cond_waveform, source_lift_gain = self._maybe_lift_conditioning_chunk(
+                    cond_waveform,
+                    gain=signals.get(f"_wavflow_gain_{cond_key}"),
+                )
             cond_chunk = self._patch_waveform_chunk(
-                self._maybe_lift_chunk(cond_waveform, gain=lift_gain),
+                cond_waveform,
                 "cond_signal",
             )
             target_downmix_chunk = None
             valid_mask = target_mask & cond_mask
             if target_downmix_signal is not None:
-                target_downmix_waveform, target_downmix_mask = (
-                    self._slice_waveform_with_right_pad(
-                        target_downmix_signal,
-                        start_frame=segment.start_frame,
-                        num_valid_frames=segment.num_valid_frames,
-                        window_frames=self.sequence_frames,
-                    )
+                (
+                    target_downmix_waveform,
+                    target_downmix_mask,
+                ) = self._slice_waveform_with_right_pad(
+                    target_downmix_signal,
+                    start_frame=segment.start_frame,
+                    num_valid_frames=segment.num_valid_frames,
+                    window_frames=self.sequence_frames,
                 )
                 target_downmix_chunk = self._patch_waveform_chunk(
                     self._maybe_lift_chunk(target_downmix_waveform, gain=lift_gain),
@@ -1055,6 +1325,11 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
         }
         if target_downmix_chunk is not None:
             sample["target_downmix_signal"] = target_downmix_chunk
+        log_gain_t = self._amplitude_lift_log_gain_tensor(
+            lift_gain if lift_gain is not None else source_lift_gain
+        )
+        if log_gain_t is not None:
+            sample["amplitude_lift_log_gain"] = log_gain_t
         return sample
 
     def describe(self) -> dict[str, Any]:
@@ -1063,6 +1338,9 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             "num_songs": len(self._songs),
             "num_datasets": len(self.dataset_roots),
             "dataset_roots": [str(path) for path in self.dataset_roots],
+            "sample_exclusion_path": self.sample_exclusion_path,
+            "sample_rate": self.sample_rate,
+            "training_sample_rate": self.training_sample_rate,
             "epoch": self._epoch,
             "epoch_num_segments": len(self._segments),
             "sequence_mode": self.sequence_mode,
@@ -1081,10 +1359,16 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             "mono_probability": self.mono_probability,
             "downmix_probability": self.downmix_probability,
             "amplitude_lift_enabled": self.amplitude_lift_enabled,
+            "amplitude_lift_mode": self.amplitude_lift_mode,
             "amplitude_lift_reference": self.amplitude_lift_reference,
             "amplitude_lift_target_rms": self.amplitude_lift_target_rms,
             "amplitude_lift_scale": self.amplitude_lift_scale,
             "amplitude_lift_clip_value": self.amplitude_lift_clip_value,
+            "amplitude_lift_waveform_clamp": self.amplitude_lift_waveform_clamp,
+            "amplitude_lift_peak_limit": self.amplitude_lift_peak_limit,
+            "amplitude_lift_peak_rescale_min_rms": (
+                self.amplitude_lift_peak_rescale_min_rms
+            ),
             "source_resample_aug_enabled": self.source_resample_aug_enabled,
             "source_resample_aug_probability": self.source_resample_aug_probability,
             "source_resample_aug_rates": list(self.source_resample_aug_rates),

@@ -14,6 +14,9 @@ _VALIDATION_GENERATION_SOLVERS = {
     "res6s",
     "res_6s",
     "midpoint",
+    "midpoint_rk2",
+    "midpoint-rk2",
+    "rk2",
     "rk4",
     "explicit_adams",
     "implicit_adams",
@@ -41,6 +44,10 @@ def validate_validation_paths(config: TrainConfig) -> None:
     if config.training.run_validation_generations:
         if (
             bool(getattr(config.data, "amplitude_lift_enabled", False))
+            and str(getattr(config.data, "amplitude_lift_mode", "rms"))
+            .strip()
+            .lower()
+            != "wavflow"
             and str(getattr(config.data, "amplitude_lift_reference", "source"))
             .strip()
             .lower()

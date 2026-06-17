@@ -26,15 +26,25 @@ class DataConfig:
     pin_memory: bool
     persistent_workers: bool
     drop_last: bool
+    training_sample_rate: int | None = None
+    sample_exclusion_path: str | list[str] | None = None
     materialize_cached_signals: bool = False
     shuffle_segments_within_song: bool = True
     batch_mode: str = "standard"
     amplitude_lift_enabled: bool = False
+    amplitude_lift_mode: str = "rms"
     amplitude_lift_reference: str = "source"
     amplitude_lift_target_rms: float = 0.33
     amplitude_lift_scale: float = 3.0
     amplitude_lift_clip_value: float | None = 4.0
+    amplitude_lift_gain_power: float = 1.0
+    amplitude_lift_gain_min_value: float | None = None
+    amplitude_lift_waveform_clamp: bool = True
+    amplitude_lift_peak_limit: float = 1.0
+    amplitude_lift_peak_rescale_min_rms: float = 0.3
+    amplitude_lift_output_lufs: float = -23.0
     amplitude_lift_eps: float = 1.0e-8
+    min_source_rms: float | None = None
     source_resample_aug_enabled: bool = False
     source_resample_aug_probability: float = 0.0
     source_resample_aug_rates: list[int] | None = None
@@ -70,11 +80,16 @@ class ModelConfig:
     max_period: float
     num_memory_tokens: int
     mix_style_dim: int = 0
+    amplitude_gain_conditioning: bool = False
     waveform_level_depth: int = 0
     waveform_micro_patch_size: int = 16
     waveform_hidden_dim: int = 16
     waveform_num_heads: int | None = None
     waveform_mlp_ratio: float = 2.0
+    final_output_kernel_size: int = 7
+    final_output_zero_init: bool = False
+    rope_enabled: bool = True
+    rope_theta: float = 10000.0
     activation_checkpointing: bool = False
 
 
@@ -156,6 +171,7 @@ class TrainingConfig:
     waveform_l1_loss_weight: float = 0.0
     waveform_charbonnier_loss_weight: float = 0.0
     waveform_charbonnier_eps: float = 1e-3
+    x_pred_v_loss_weight: float = 0.0
     perceptual_loss_weight: float = 0.0
     perceptual_n_fft: int = 1024
     perceptual_hop_length: int = 256
@@ -209,6 +225,8 @@ class TrainingConfig:
     flow_schedule_base_shift: float = 0.5
     flow_schedule_max_shift: float = 1.15
     flow_loss_weighting: str = "none"
+    flow_one_step: bool = False
+    flow_one_step_input: str = "zeros"
     use_ema: bool = False
     ema_decay: float = 0.999
     ema_device: str = "accelerator"

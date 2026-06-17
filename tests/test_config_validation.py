@@ -156,6 +156,14 @@ def test_validate_config_rejects_invalid_sample_rate() -> None:
         validate_config(config)
 
 
+def test_validate_config_rejects_training_sample_rate_above_sample_rate() -> None:
+    config = _valid_config()
+    config.data.training_sample_rate = 96_000
+
+    with pytest.raises(ValueError, match="training_sample_rate"):
+        validate_config(config)
+
+
 def test_validate_config_rejects_invalid_source_resample_augmentation() -> None:
     config = _valid_config()
     config.data.source_resample_aug_enabled = True
@@ -251,6 +259,23 @@ def test_validate_config_accepts_res6s_validation_generation_solver() -> None:
     validate_config(config)
 
 
+@pytest.mark.parametrize("solver", ["midpoint", "midpoint_rk2", "midpoint-rk2", "rk2"])
+def test_validate_config_accepts_midpoint_rk2_validation_generation_solver(
+    solver: str,
+) -> None:
+    config = _valid_config()
+    config.training.validation_steps = 1
+    config.training.run_validation_generations = True
+    config.training.num_valid_generations = 1
+    config.training.validation_generation_input_path = "dataset/validation_audio"
+    config.training.validation_generation_output_path = "runs/test/validation_audio"
+    config.training.validation_generation_solver = solver
+    config.training.validation_generation_solver_steps = 20
+    config.training.validation_generation_chunk_seconds = 12.0
+    config.training.validation_generation_overlap_seconds = 4.0
+    validate_config(config)
+
+
 def test_validate_config_rejects_invalid_validation_generation_solver() -> None:
     config = _valid_config()
     config.training.validation_steps = 1
@@ -278,6 +303,20 @@ def test_validate_config_rejects_target_lift_for_validation_generations() -> Non
         validate_config(config)
 
 
+def test_validate_config_allows_wavflow_lift_for_validation_generations() -> None:
+    config = _valid_config()
+    config.data.amplitude_lift_enabled = True
+    config.data.amplitude_lift_mode = "wavflow"
+    config.data.amplitude_lift_reference = "target"
+    config.training.validation_steps = 1
+    config.training.run_validation_generations = True
+    config.training.num_valid_generations = 1
+    config.training.validation_generation_input_path = "dataset/validation_audio"
+    config.training.validation_generation_output_path = "runs/test/validation_audio"
+
+    validate_config(config)
+
+
 def test_validate_config_rejects_invalid_amplitude_lift_clip_value() -> None:
     config = _valid_config()
     config.data.amplitude_lift_clip_value = 0.0
@@ -286,10 +325,33 @@ def test_validate_config_rejects_invalid_amplitude_lift_clip_value() -> None:
         validate_config(config)
 
 
+def test_validate_config_rejects_invalid_amplitude_lift_mode() -> None:
+    config = _valid_config()
+    config.data.amplitude_lift_mode = "peak"
+
+    with pytest.raises(ValueError, match="amplitude_lift_mode"):
+        validate_config(config)
+
+
 def test_validate_config_allows_unclipped_amplitude_lift() -> None:
     config = _valid_config()
     config.data.amplitude_lift_enabled = True
     config.data.amplitude_lift_clip_value = None
+
+    validate_config(config)
+
+
+def test_validate_config_rejects_invalid_min_source_rms() -> None:
+    config = _valid_config()
+    config.data.min_source_rms = 0.0
+
+    with pytest.raises(ValueError, match="min_source_rms"):
+        validate_config(config)
+
+
+def test_validate_config_allows_min_source_rms() -> None:
+    config = _valid_config()
+    config.data.min_source_rms = 0.04
 
     validate_config(config)
 
@@ -337,14 +399,25 @@ def test_validate_config_rejects_mismatched_mrstft_resolution_lists() -> None:
         validate_config(config)
 
 
-def test_validate_config_rejects_all_zero_waveform_reconstruction_weights() -> None:
+def test_validate_config_rejects_all_zero_x_prediction_weights() -> None:
     config = _valid_config()
     config.training.waveform_mse_loss_weight = 0.0
     config.training.waveform_l1_loss_weight = 0.0
     config.training.waveform_charbonnier_loss_weight = 0.0
+    config.training.x_pred_v_loss_weight = 0.0
 
-    with pytest.raises(ValueError, match="waveform reconstruction"):
+    with pytest.raises(ValueError, match="waveform/x-prediction"):
         validate_config(config)
+
+
+def test_validate_config_allows_velocity_only_x_prediction_loss() -> None:
+    config = _valid_config()
+    config.training.waveform_mse_loss_weight = 0.0
+    config.training.waveform_l1_loss_weight = 0.0
+    config.training.waveform_charbonnier_loss_weight = 0.0
+    config.training.x_pred_v_loss_weight = 1.0
+
+    validate_config(config)
 
 
 def test_validate_config_rejects_invalid_waveform_charbonnier_eps() -> None:

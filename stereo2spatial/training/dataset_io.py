@@ -11,7 +11,9 @@ import torch
 
 from stereo2spatial.common.amplitude_lift import (
     apply_amplitude_lift,
-    compute_shared_rms_gain,
+    resolve_amplitude_lift_gain,
+    wavflow_source_transform,
+    wavflow_target_transform,
 )
 from stereo2spatial.common.mix_style import mix_style_dict_to_vector
 
@@ -58,7 +60,11 @@ def _patch_audio(signal: torch.Tensor, patch_size: int, name: str) -> torch.Tens
             device=signal.device,
         )
         signal = torch.cat([signal, pad], dim=-1)
-    return signal.reshape(signal.shape[0], frame_count, patch_size).permute(0, 2, 1).contiguous()
+    return (
+        signal.reshape(signal.shape[0], frame_count, patch_size)
+        .permute(0, 2, 1)
+        .contiguous()
+    )
 
 
 def _to_cpt(signal: torch.Tensor, name: str, patch_size: int) -> torch.Tensor:
@@ -155,13 +161,19 @@ def _try_read_metadata(sample_dir: Path) -> dict[str, Any]:
         "sample_rate": int(sample_rate) if isinstance(sample_rate, int) else None,
         "input_samples": int(input_samples) if isinstance(input_samples, int) else None,
         "mix_style": mix_style if isinstance(mix_style, dict) else None,
-        "mix_style_vector": mix_style_vector if isinstance(mix_style_vector, list) else None,
-        "mix_style_names": mix_style_names if isinstance(mix_style_names, list) else None,
+        "mix_style_vector": mix_style_vector
+        if isinstance(mix_style_vector, list)
+        else None,
+        "mix_style_names": mix_style_names
+        if isinstance(mix_style_names, list)
+        else None,
         "signal_rms": signal_rms if isinstance(signal_rms, dict) else None,
     }
 
 
-def _coerce_mix_style(payload: dict[str, Any], metadata: dict[str, Any]) -> tuple[float, ...] | None:
+def _coerce_mix_style(
+    payload: dict[str, Any], metadata: dict[str, Any]
+) -> tuple[float, ...] | None:
     """Read the normalized style vector from manifest first, then metadata."""
     for source in (payload.get("mix_style_vector"), metadata.get("mix_style_vector")):
         if isinstance(source, list):
@@ -245,7 +257,9 @@ def _load_manifest_records(
             target_channels = int(target_shape[0])
             if len(target_shape) == 2:
                 target_samples = int(target_shape[1])
-                target_frames = max(1, (target_samples + int(patch_size) - 1) // int(patch_size))
+                target_frames = max(
+                    1, (target_samples + int(patch_size) - 1) // int(patch_size)
+                )
             else:
                 target_frames = int(target_shape[2])
             metadata = _try_read_metadata(sample_dir)
@@ -266,24 +280,207 @@ def _load_manifest_records(
     return songs
 
 
+def _filter_songs_by_min_source_rms(
+    songs: list[SongRecord],
+    *,
+    min_source_rms: float | None,
+    rms_key: str = "source_stereo_signal",
+) -> tuple[list[SongRecord], int, int]:
+    """Drop songs whose precomputed source RMS falls below ``min_source_rms``.
+
+    Songs without a stored RMS value are kept so the filter cannot silently
+    empty datasets that predate RMS metadata.
+
+    Returns:
+        (kept_songs, dropped_count, missing_rms_count)
+    """
+    if min_source_rms is None:
+        return songs, 0, 0
+    threshold = float(min_source_rms)
+    if threshold <= 0.0:
+        raise ValueError("min_source_rms must be > 0 when set")
+
+    kept: list[SongRecord] = []
+    dropped = 0
+    missing = 0
+    for song in songs:
+        rms = (song.signal_rms or {}).get(rms_key)
+        if rms is None:
+            missing += 1
+            kept.append(song)
+            continue
+        if float(rms) < threshold:
+            dropped += 1
+            continue
+        kept.append(song)
+    return kept, dropped, missing
+
+
+def _path_list_or_none(
+    value: str | Path | list[str | Path] | None,
+) -> list[Path]:
+    """Normalize an optional path or path list."""
+    if value is None:
+        return []
+    if isinstance(value, (str, Path)):
+        return [Path(value)]
+    if not isinstance(value, list):
+        raise TypeError("sample exclusion path must be a path or list of paths")
+    return [Path(item) for item in value]
+
+
+def _load_sample_exclusion_keys(
+    paths: str | Path | list[str | Path] | None,
+) -> tuple[set[str], set[str]]:
+    """Load excluded stream hashes and sample dirs from JSON, CSV, or text files."""
+    stream_hashes: set[str] = set()
+    sample_dirs: set[str] = set()
+    for path in _path_list_or_none(paths):
+        if not path.exists():
+            raise FileNotFoundError(f"Sample exclusion file not found: {path}")
+        suffix = path.suffix.lower()
+        if suffix == ".json":
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                stream_hashes.update(str(item).strip().lower() for item in payload)
+            elif isinstance(payload, dict):
+                for key in (
+                    "exclude_stream_hashes",
+                    "excluded_stream_hashes",
+                    "stream_hashes",
+                ):
+                    values = payload.get(key)
+                    if isinstance(values, list):
+                        stream_hashes.update(
+                            str(item).strip().lower() for item in values
+                        )
+                for key in (
+                    "exclude_sample_dirs",
+                    "excluded_sample_dirs",
+                    "sample_dirs",
+                ):
+                    values = payload.get(key)
+                    if isinstance(values, list):
+                        sample_dirs.update(
+                            str(item).replace("\\", "/").lower() for item in values
+                        )
+            else:
+                raise TypeError(f"Unsupported JSON exclusion payload in {path}")
+        elif suffix == ".csv":
+            import csv
+
+            with path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                if reader.fieldnames is None:
+                    continue
+                for row in reader:
+                    stream_hash = str(row.get("stream_hash") or "").strip().lower()
+                    sample_dir = (
+                        str(row.get("sample_dir") or "").replace("\\", "/").lower()
+                    )
+                    if stream_hash:
+                        stream_hashes.add(stream_hash)
+                    if sample_dir:
+                        sample_dirs.add(sample_dir)
+        else:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                value = line.strip()
+                if not value or value.startswith("#"):
+                    continue
+                stream_hashes.add(value.lower())
+    stream_hashes.discard("")
+    sample_dirs.discard("")
+    return stream_hashes, sample_dirs
+
+
+def _filter_songs_by_sample_exclusion(
+    songs: list[SongRecord],
+    *,
+    sample_exclusion_path: str | Path | list[str | Path] | None,
+) -> tuple[list[SongRecord], int]:
+    """Drop songs whose stream hash or sample directory is listed for exclusion."""
+    stream_hashes, sample_dirs = _load_sample_exclusion_keys(sample_exclusion_path)
+    if not stream_hashes and not sample_dirs:
+        return songs, 0
+
+    kept: list[SongRecord] = []
+    dropped = 0
+    for song in songs:
+        stream_hash = song.stream_hash.strip().lower()
+        sample_dir = str(song.sample_dir).replace("\\", "/").lower()
+        sample_dir_name = song.sample_dir.name.strip().lower()
+        if (
+            stream_hash in stream_hashes
+            or sample_dir_name in stream_hashes
+            or sample_dir in sample_dirs
+        ):
+            dropped += 1
+            continue
+        kept.append(song)
+    return kept, dropped
+
+
 def _apply_amplitude_lift_to_signals(
     signals: dict[str, torch.Tensor],
     *,
+    mode: str,
     reference: str,
     target_rms: float,
     scale: float,
     clip_value: float | None,
     eps: float,
+    gain_power: float = 1.0,
+    gain_min_value: float | None = None,
+    waveform_clamp: bool = True,
+    peak_limit: float = 1.0,
+    peak_rescale_min_rms: float = 0.3,
 ) -> dict[str, torch.Tensor]:
     """Apply one shared RMS lift gain to all raw sample signals before patching."""
+    mode_name = str(mode).strip().lower()
+    if mode_name == "wavflow":
+        if "target_signal" not in signals:
+            raise KeyError("WavFlow amplitude lifting requires target_signal")
+        lifted = dict(signals)
+        lifted["target_signal"], _target_gain = wavflow_target_transform(
+            signals["target_signal"],
+            target_rms=float(target_rms),
+            scale=float(scale),
+            peak_limit=float(peak_limit),
+            peak_rescale_min_rms=float(peak_rescale_min_rms),
+            waveform_clamp=bool(waveform_clamp),
+            eps=float(eps),
+        )
+        if "source_downmix_signal" in signals:
+            lifted["source_downmix_signal"], _downmix_gain = wavflow_target_transform(
+                signals["source_downmix_signal"],
+                target_rms=float(target_rms),
+                scale=float(scale),
+                peak_limit=float(peak_limit),
+                peak_rescale_min_rms=float(peak_rescale_min_rms),
+                waveform_clamp=bool(waveform_clamp),
+                eps=float(eps),
+            )
+        for key in ("source_stereo_signal", "source_mono_signal"):
+            if key not in signals:
+                continue
+            lifted[key], _source_gain = wavflow_source_transform(
+                signals[key],
+                target_rms=float(target_rms),
+                scale=float(scale),
+                peak_limit=float(peak_limit),
+                eps=float(eps),
+            )
+        return lifted
+
     normalized_reference = str(reference).strip().lower()
     reference_key = (
         "target_signal" if normalized_reference == "target" else "source_stereo_signal"
     )
     if reference_key not in signals:
         raise KeyError(f"Amplitude lifting reference signal missing: {reference_key}")
-    gain = compute_shared_rms_gain(
+    gain = resolve_amplitude_lift_gain(
         signals[reference_key].float(),
+        mode=mode,
         target_rms=float(target_rms),
         eps=float(eps),
     )
@@ -292,7 +489,9 @@ def _apply_amplitude_lift_to_signals(
             value.float(),
             gain=gain,
             scale=float(scale),
-            clip_value=clip_value,
+            clip_value=None if mode_name == "scale" else clip_value,
+            gain_power=gain_power,
+            gain_min_value=gain_min_value,
         )
         for key, value in signals.items()
     }
@@ -303,11 +502,17 @@ def _load_signals_from_sample(
     patch_size: int,
     *,
     amplitude_lift_enabled: bool = False,
+    amplitude_lift_mode: str = "rms",
     amplitude_lift_reference: str = "source",
     amplitude_lift_target_rms: float = 0.33,
     amplitude_lift_scale: float = 3.0,
     amplitude_lift_clip_value: float | None = 4.0,
     amplitude_lift_eps: float = 1.0e-8,
+    amplitude_lift_gain_power: float = 1.0,
+    amplitude_lift_gain_min_value: float | None = None,
+    amplitude_lift_waveform_clamp: bool = True,
+    amplitude_lift_peak_limit: float = 1.0,
+    amplitude_lift_peak_rescale_min_rms: float = 0.3,
 ) -> dict[str, torch.Tensor]:
     """Load and normalize signal tensors from one sample directory."""
     signals = _load_raw_signals_from_sample(sample_dir)
@@ -315,11 +520,17 @@ def _load_signals_from_sample(
     if amplitude_lift_enabled:
         signals = _apply_amplitude_lift_to_signals(
             signals,
+            mode=amplitude_lift_mode,
             reference=amplitude_lift_reference,
             target_rms=amplitude_lift_target_rms,
             scale=amplitude_lift_scale,
             clip_value=amplitude_lift_clip_value,
             eps=amplitude_lift_eps,
+            gain_power=amplitude_lift_gain_power,
+            gain_min_value=amplitude_lift_gain_min_value,
+            waveform_clamp=amplitude_lift_waveform_clamp,
+            peak_limit=amplitude_lift_peak_limit,
+            peak_rescale_min_rms=amplitude_lift_peak_rescale_min_rms,
         )
 
     normalized: dict[str, torch.Tensor] = {}
@@ -352,16 +563,15 @@ def _load_raw_signals_from_sample(sample_dir: Path) -> dict[str, torch.Tensor]:
             "source_stereo_signal": sample_dir / SOURCE_STEREO_SIGNAL_FLAC_FILENAME,
         }
         if all(path.exists() for path in flac_paths.values()):
-            signals = {
-                key: _read_flac_signal(path)
-                for key, path in flac_paths.items()
-            }
+            signals = {key: _read_flac_signal(path) for key, path in flac_paths.items()}
             source_mono_flac = sample_dir / SOURCE_MONO_SIGNAL_FLAC_FILENAME
             if source_mono_flac.exists():
                 signals["source_mono_signal"] = _read_flac_signal(source_mono_flac)
             source_downmix_flac = sample_dir / SOURCE_DOWNMIX_SIGNAL_FLAC_FILENAME
             if source_downmix_flac.exists():
-                signals["source_downmix_signal"] = _read_flac_signal(source_downmix_flac)
+                signals["source_downmix_signal"] = _read_flac_signal(
+                    source_downmix_flac
+                )
         else:
             required_split_paths = {
                 "target_signal": sample_dir / TARGET_SIGNAL_FILENAME,

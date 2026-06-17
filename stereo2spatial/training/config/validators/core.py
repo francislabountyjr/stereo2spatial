@@ -12,6 +12,10 @@ def validate_data_section(config: TrainConfig) -> None:
     require_positive(config.data.sequence_seconds, "data.sequence_seconds")
     require_positive(config.data.stride_seconds, "data.stride_seconds")
     require_positive(config.data.sample_rate, "data.sample_rate")
+    if config.data.training_sample_rate is not None:
+        require_positive(config.data.training_sample_rate, "data.training_sample_rate")
+        if int(config.data.training_sample_rate) > int(config.data.sample_rate):
+            raise ValueError("data.training_sample_rate must be <= data.sample_rate")
     require_non_negative(config.data.cache_size, "data.cache_size")
     require_positive(config.data.batch_size, "data.batch_size")
     require_non_negative(config.data.num_workers, "data.num_workers")
@@ -37,9 +41,10 @@ def validate_data_section(config: TrainConfig) -> None:
 
     lift_reference = str(config.data.amplitude_lift_reference).strip().lower()
     if lift_reference not in {"source", "target"}:
-        raise ValueError(
-            "data.amplitude_lift_reference must be one of: source, target"
-        )
+        raise ValueError("data.amplitude_lift_reference must be one of: source, target")
+    lift_mode = str(config.data.amplitude_lift_mode).strip().lower()
+    if lift_mode not in {"rms", "scale", "wavflow"}:
+        raise ValueError("data.amplitude_lift_mode must be one of: rms, scale, wavflow")
     require_positive(
         config.data.amplitude_lift_target_rms, "data.amplitude_lift_target_rms"
     )
@@ -50,6 +55,29 @@ def validate_data_section(config: TrainConfig) -> None:
             "data.amplitude_lift_clip_value",
         )
     require_positive(config.data.amplitude_lift_eps, "data.amplitude_lift_eps")
+    gain_power = float(getattr(config.data, "amplitude_lift_gain_power", 1.0))
+    if not (0.0 <= gain_power <= 1.0):
+        raise ValueError("data.amplitude_lift_gain_power must be in [0.0, 1.0]")
+    gain_min_value = getattr(config.data, "amplitude_lift_gain_min_value", None)
+    if gain_min_value is not None and float(gain_min_value) <= 0.0:
+        raise ValueError("data.amplitude_lift_gain_min_value must be > 0 when set")
+    require_positive(
+        getattr(config.data, "amplitude_lift_peak_limit", 1.0),
+        "data.amplitude_lift_peak_limit",
+    )
+    require_positive(
+        getattr(config.data, "amplitude_lift_peak_rescale_min_rms", 0.3),
+        "data.amplitude_lift_peak_rescale_min_rms",
+    )
+    min_source_rms = getattr(config.data, "min_source_rms", None)
+    if min_source_rms is not None and not (0.0 < float(min_source_rms) < 1.0):
+        raise ValueError("data.min_source_rms must be in (0, 1) when set")
+    if bool(getattr(config.model, "amplitude_gain_conditioning", False)):
+        if not bool(getattr(config.data, "amplitude_lift_enabled", False)):
+            raise ValueError(
+                "model.amplitude_gain_conditioning requires "
+                "data.amplitude_lift_enabled=true"
+            )
 
     require_probability(
         config.data.source_resample_aug_probability,
@@ -67,9 +95,7 @@ def validate_data_section(config: TrainConfig) -> None:
             require_positive(rate, f"data.source_resample_augmentation.rates[{index}]")
     if weights is not None:
         if not rates:
-            raise ValueError(
-                "data.source_resample_augmentation.weights requires rates"
-            )
+            raise ValueError("data.source_resample_augmentation.weights requires rates")
         if len(weights) != len(rates):
             raise ValueError(
                 "data.source_resample_augmentation.weights must match rates length"
@@ -176,13 +202,29 @@ def validate_model_section(config: TrainConfig) -> None:
         raise ValueError("model.max_period must be > 1")
     require_non_negative(config.model.num_memory_tokens, "model.num_memory_tokens")
     require_non_negative(config.model.mix_style_dim, "model.mix_style_dim")
-    require_non_negative(config.model.waveform_level_depth, "model.waveform_level_depth")
+    require_non_negative(
+        config.model.waveform_level_depth, "model.waveform_level_depth"
+    )
     require_positive(
         config.model.waveform_micro_patch_size,
         "model.waveform_micro_patch_size",
     )
     require_positive(config.model.waveform_hidden_dim, "model.waveform_hidden_dim")
     require_positive(config.model.waveform_mlp_ratio, "model.waveform_mlp_ratio")
+    require_positive(
+        config.model.final_output_kernel_size,
+        "model.final_output_kernel_size",
+    )
+    if config.model.final_output_kernel_size % 2 == 0:
+        raise ValueError("model.final_output_kernel_size must be odd")
+    if config.model.rope_enabled:
+        require_positive(config.model.rope_theta, "model.rope_theta")
+        if config.model.rope_theta <= 1:
+            raise ValueError("model.rope_theta must be > 1")
+        if (config.model.hidden_dim // config.model.num_heads) % 2 != 0:
+            raise ValueError(
+                "model.hidden_dim / model.num_heads must be even when RoPE is enabled"
+            )
     waveform_num_heads = (
         config.model.num_heads
         if config.model.waveform_num_heads is None
@@ -199,4 +241,12 @@ def validate_model_section(config: TrainConfig) -> None:
             raise ValueError(
                 "model.hidden_dim must be divisible by model.waveform_num_heads "
                 "when waveform_level_depth > 0"
+            )
+        if (
+            config.model.rope_enabled
+            and (config.model.hidden_dim // waveform_num_heads) % 2 != 0
+        ):
+            raise ValueError(
+                "model.hidden_dim / model.waveform_num_heads must be even "
+                "when waveform_level_depth > 0 and RoPE is enabled"
             )

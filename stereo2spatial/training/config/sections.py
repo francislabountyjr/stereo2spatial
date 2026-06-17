@@ -71,6 +71,17 @@ def _optional_str_list(value: Any) -> list[str] | None:
     raise TypeError("Expected value to be a list/tuple or null.")
 
 
+def _optional_path_or_path_list(value: Any) -> str | list[str] | None:
+    """Return ``None``, one string path, or a list of string paths."""
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    raise TypeError("Expected value to be a path string, list/tuple, or null.")
+
+
 def _coerce_dataset_paths(
     data_raw: dict[str, Any]
 ) -> tuple[str | list[str], str | list[str]]:
@@ -176,9 +187,7 @@ def _build_source_codec_aug_fields(data_raw: dict[str, Any]) -> dict[str, Any]:
             None if max_chunk_seconds is None else float(max_chunk_seconds)
         ),
         "source_codec_aug_align_max_lag": int(aug_raw.get("align_max_lag", 8192)),
-        "source_codec_aug_timeout_seconds": float(
-            aug_raw.get("timeout_seconds", 20.0)
-        ),
+        "source_codec_aug_timeout_seconds": float(aug_raw.get("timeout_seconds", 20.0)),
     }
 
 
@@ -193,6 +202,11 @@ def build_data_config(data_raw: dict[str, Any]) -> DataConfig:
         sequence_seconds=float(require_key(data_raw, "sequence_seconds")),
         stride_seconds=float(require_key(data_raw, "stride_seconds")),
         sample_rate=int(require_key(data_raw, "sample_rate")),
+        training_sample_rate=(
+            None
+            if data_raw.get("training_sample_rate") is None
+            else int(data_raw["training_sample_rate"])
+        ),
         mono_probability=float(require_key(data_raw, "mono_probability")),
         downmix_probability=float(require_key(data_raw, "downmix_probability")),
         cache_size=int(require_key(data_raw, "cache_size")),
@@ -208,11 +222,15 @@ def build_data_config(data_raw: dict[str, Any]) -> DataConfig:
         pin_memory=bool(require_key(data_raw, "pin_memory")),
         persistent_workers=bool(require_key(data_raw, "persistent_workers")),
         drop_last=bool(require_key(data_raw, "drop_last")),
+        sample_exclusion_path=_optional_path_or_path_list(
+            data_raw.get("sample_exclusion_path")
+        ),
         materialize_cached_signals=bool(
             data_raw.get("materialize_cached_signals", False)
         ),
         batch_mode=str(data_raw.get("batch_mode", "standard")),
         amplitude_lift_enabled=bool(data_raw.get("amplitude_lift_enabled", False)),
+        amplitude_lift_mode=str(data_raw.get("amplitude_lift_mode", "rms")),
         amplitude_lift_reference=str(
             data_raw.get("amplitude_lift_reference", "source")
         ),
@@ -225,7 +243,28 @@ def build_data_config(data_raw: dict[str, Any]) -> DataConfig:
             if data_raw.get("amplitude_lift_clip_value", 4.0) is None
             else float(data_raw.get("amplitude_lift_clip_value", 4.0))
         ),
+        amplitude_lift_gain_power=float(data_raw.get("amplitude_lift_gain_power", 1.0)),
+        amplitude_lift_gain_min_value=(
+            None
+            if data_raw.get("amplitude_lift_gain_min_value") is None
+            else float(data_raw["amplitude_lift_gain_min_value"])
+        ),
+        amplitude_lift_waveform_clamp=bool(
+            data_raw.get("amplitude_lift_waveform_clamp", True)
+        ),
+        amplitude_lift_peak_limit=float(data_raw.get("amplitude_lift_peak_limit", 1.0)),
+        amplitude_lift_peak_rescale_min_rms=float(
+            data_raw.get("amplitude_lift_peak_rescale_min_rms", 0.3)
+        ),
+        amplitude_lift_output_lufs=float(
+            data_raw.get("amplitude_lift_output_lufs", -23.0)
+        ),
         amplitude_lift_eps=float(data_raw.get("amplitude_lift_eps", 1.0e-8)),
+        min_source_rms=(
+            None
+            if data_raw.get("min_source_rms") is None
+            else float(data_raw["min_source_rms"])
+        ),
         **_build_source_resample_aug_fields(data_raw),
         **_build_source_codec_aug_fields(data_raw),
     )
@@ -247,6 +286,9 @@ def build_model_config(model_raw: dict[str, Any]) -> ModelConfig:
         max_period=float(require_key(model_raw, "max_period")),
         num_memory_tokens=int(model_raw.get("num_memory_tokens", 0)),
         mix_style_dim=int(model_raw.get("mix_style_dim", 0)),
+        amplitude_gain_conditioning=bool(
+            model_raw.get("amplitude_gain_conditioning", False)
+        ),
         waveform_level_depth=int(model_raw.get("waveform_level_depth", 0)),
         waveform_micro_patch_size=int(model_raw.get("waveform_micro_patch_size", 16)),
         waveform_hidden_dim=int(model_raw.get("waveform_hidden_dim", 16)),
@@ -256,6 +298,10 @@ def build_model_config(model_raw: dict[str, Any]) -> ModelConfig:
             else None
         ),
         waveform_mlp_ratio=float(model_raw.get("waveform_mlp_ratio", 2.0)),
+        final_output_kernel_size=int(model_raw.get("final_output_kernel_size", 7)),
+        final_output_zero_init=bool(model_raw.get("final_output_zero_init", False)),
+        rope_enabled=bool(model_raw.get("rope_enabled", True)),
+        rope_theta=float(model_raw.get("rope_theta", 10000.0)),
         activation_checkpointing=bool(model_raw.get("activation_checkpointing", False)),
     )
 
@@ -410,6 +456,7 @@ def _build_training_aux_loss_fields(training_raw: dict[str, Any]) -> dict[str, A
         "waveform_charbonnier_eps": float(
             training_raw.get("waveform_charbonnier_eps", 1e-3)
         ),
+        "x_pred_v_loss_weight": float(training_raw.get("x_pred_v_loss_weight", 0.0)),
         "perceptual_loss_weight": float(
             training_raw.get("perceptual_loss_weight", 0.0)
         ),

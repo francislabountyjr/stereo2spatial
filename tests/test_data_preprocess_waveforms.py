@@ -2,26 +2,26 @@ from __future__ import annotations
 
 import json
 
-import torch
 import pytest
 import soundfile as sf
+import torch
 
+from scripts.data.convert_dataset_to_flac import (
+    _convert_one,
+    _matching_lengths_or_raise,
+)
 from scripts.data.find_invalid_samples import _scan_sample
 from scripts.data.preprocess_dataset import (
-    SOURCE_STEREO_SIGNAL_FLAC_FILENAME,
     SOURCE_DOWNMIX_SIGNAL_FILENAME,
-    TARGET_SIGNAL_FLAC_FILENAME,
     SOURCE_MONO_SIGNAL_FILENAME,
     SOURCE_STEREO_SIGNAL_FILENAME,
+    SOURCE_STEREO_SIGNAL_FLAC_FILENAME,
     TARGET_SIGNAL_FILENAME,
+    TARGET_SIGNAL_FLAC_FILENAME,
     align_signal_lengths,
     duplicate_mono_to_stereo_width,
     flac_sample_artifacts_exist,
     split_sample_artifacts_exist,
-)
-from scripts.data.convert_dataset_to_flac import (
-    _convert_one,
-    _matching_lengths_or_raise,
 )
 
 

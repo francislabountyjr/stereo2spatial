@@ -21,6 +21,7 @@ def _base_config_payload() -> dict[str, Any]:
             "sequence_seconds": 10.0,
             "stride_seconds": 5.0,
             "sample_rate": 48_000,
+            "training_sample_rate": 24_000,
             "mono_probability": 0.1,
             "downmix_probability": 0.1,
             "cache_size": 8,
@@ -30,6 +31,9 @@ def _base_config_payload() -> dict[str, Any]:
             "pin_memory": False,
             "persistent_workers": False,
             "drop_last": False,
+            "sample_exclusion_path": "dataset/exclude.json",
+            "amplitude_lift_mode": "scale",
+            "min_source_rms": 0.04,
         },
         "model": {
             "target_channels": 12,
@@ -48,6 +52,10 @@ def _base_config_payload() -> dict[str, Any]:
             "waveform_hidden_dim": 16,
             "waveform_num_heads": 8,
             "waveform_mlp_ratio": 2.0,
+            "final_output_kernel_size": 9,
+            "final_output_zero_init": True,
+            "rope_enabled": True,
+            "rope_theta": 20000.0,
             "activation_checkpointing": True,
         },
         "training": {
@@ -123,6 +131,7 @@ def test_load_config_reads_scheduled_sampling_fields(tmp_path: Path) -> None:
         "waveform_l1_loss_weight": 0.5,
         "waveform_charbonnier_loss_weight": 0.75,
         "waveform_charbonnier_eps": 1e-4,
+        "x_pred_v_loss_weight": 0.125,
         "perceptual_loss_weight": 0.03,
         "perceptual_n_fft": 512,
         "perceptual_hop_length": 128,
@@ -225,6 +234,7 @@ def test_load_config_reads_scheduled_sampling_fields(tmp_path: Path) -> None:
     assert config.training.waveform_l1_loss_weight == pytest.approx(0.5)
     assert config.training.waveform_charbonnier_loss_weight == pytest.approx(0.75)
     assert config.training.waveform_charbonnier_eps == pytest.approx(1e-4)
+    assert config.training.x_pred_v_loss_weight == pytest.approx(0.125)
     assert config.training.perceptual_loss_weight == pytest.approx(0.03)
     assert config.training.perceptual_n_fft == 512
     assert config.training.perceptual_hop_length == 128
@@ -282,11 +292,19 @@ def test_load_config_reads_scheduled_sampling_fields(tmp_path: Path) -> None:
         "aac": [128, 192],
         "opus": [96, 160],
     }
+    assert config.data.amplitude_lift_mode == "scale"
+    assert config.data.min_source_rms == pytest.approx(0.04)
+    assert config.data.sample_exclusion_path == "dataset/exclude.json"
+    assert config.data.training_sample_rate == 24_000
     assert config.model.waveform_level_depth == 2
     assert config.model.waveform_micro_patch_size == 16
     assert config.model.waveform_hidden_dim == 16
     assert config.model.waveform_num_heads == 8
     assert config.model.waveform_mlp_ratio == pytest.approx(2.0)
+    assert config.model.final_output_kernel_size == 9
+    assert config.model.final_output_zero_init is True
+    assert config.model.rope_enabled is True
+    assert config.model.rope_theta == pytest.approx(20000.0)
     assert config.model.activation_checkpointing is True
 
 
