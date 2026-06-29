@@ -35,6 +35,14 @@ def validate_training_schedule(config: TrainConfig, sequence_mode: str) -> None:
     if config.training.init_from_checkpoint is not None:
         if not str(config.training.init_from_checkpoint).strip():
             raise ValueError("training.init_from_checkpoint cannot be empty")
+    init_weights_source = str(
+        getattr(config.training, "init_from_checkpoint_weights_source", "student")
+    ).strip().lower()
+    if init_weights_source not in {"student", "ema", "auto"}:
+        raise ValueError(
+            "training.init_from_checkpoint_weights_source must be one of: "
+            "student, ema, auto"
+        )
 
     require_positive(config.training.log_every, "training.log_every")
     require_positive(config.training.checkpoint_every, "training.checkpoint_every")

@@ -164,6 +164,77 @@ def test_load_model_weights_only_rejects_non_mapping_payload(tmp_path: Path) -> 
         _load_model_weights_only(_TinyModel(), checkpoint_path)
 
 
+def test_load_model_weights_only_can_load_ema_from_checkpoint_dir(
+    tmp_path: Path,
+) -> None:
+    checkpoint_dir = tmp_path / "step_0000001"
+    checkpoint_dir.mkdir(parents=True)
+
+    source_model = _TinyModel()
+    for parameter in source_model.parameters():
+        parameter.data.normal_(mean=0.5, std=0.1)
+
+    torch.save(
+        {"decay": 0.999, "model": source_model.state_dict()},
+        checkpoint_dir / "custom_checkpoint_0.pkl",
+    )
+
+    target_model = _TinyModel()
+    for parameter in target_model.parameters():
+        parameter.data.zero_()
+
+    source = _load_model_weights_only(
+        target_model,
+        checkpoint_dir,
+        weights_source="ema",
+    )
+
+    assert source == "ema"
+    for name, tensor in source_model.state_dict().items():
+        assert torch.allclose(target_model.state_dict()[name], tensor)
+
+
+def test_load_model_weights_only_auto_prefers_ema_from_checkpoint_dir(
+    tmp_path: Path,
+) -> None:
+    checkpoint_dir = tmp_path / "step_0000001"
+    checkpoint_dir.mkdir(parents=True)
+
+    source_model = _TinyModel()
+    for parameter in source_model.parameters():
+        parameter.data.normal_(mean=0.5, std=0.1)
+
+    torch.save(
+        {"decay": 0.999, "model": source_model.state_dict()},
+        checkpoint_dir / "custom_checkpoint_0.pkl",
+    )
+
+    target_model = _TinyModel()
+    source = _load_model_weights_only(
+        target_model,
+        checkpoint_dir,
+        weights_source="auto",
+    )
+
+    assert source == "ema"
+    for name, tensor in source_model.state_dict().items():
+        assert torch.allclose(target_model.state_dict()[name], tensor)
+
+
+def test_load_model_weights_only_errors_when_ema_requested_but_missing(
+    tmp_path: Path,
+) -> None:
+    checkpoint_dir = tmp_path / "step_0000001"
+    checkpoint_dir.mkdir(parents=True)
+
+    with pytest.raises(FileNotFoundError, match="Requested EMA init weights"):
+        _load_model_weights_only(
+            _TinyModel(),
+            checkpoint_dir,
+            weights_source="ema",
+        )
+
+
 def test_checkpoint_has_ema_state_detects_valid_custom_payload(tmp_path: Path) -> None:
     checkpoint_dir = tmp_path / "step_0000001"
     checkpoint_dir.mkdir(parents=True)

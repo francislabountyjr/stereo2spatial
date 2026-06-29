@@ -319,6 +319,9 @@ def _build_training_checkpoint_fields(training_raw: dict[str, Any]) -> dict[str,
             if training_raw.get("init_from_checkpoint") is not None
             else None
         ),
+        "init_from_checkpoint_weights_source": str(
+            training_raw.get("init_from_checkpoint_weights_source", "student")
+        ).strip().lower(),
     }
 
 

@@ -284,26 +284,76 @@ def _checkpoint_has_ema_state(checkpoint_path: Path) -> bool:
     return False
 
 
-def _load_model_weights_only(model: torch.nn.Module, checkpoint_path: Path) -> None:
-    """Load model weights from directory, safetensors file, or torch payload."""
+def _load_ema_state_dict_from_checkpoint_dir(
+    checkpoint_path: Path,
+) -> dict[str, torch.Tensor] | None:
+    """Load EMA model state from an Accelerate checkpoint directory."""
+    if not checkpoint_path.is_dir():
+        return None
+    candidates = sorted(
+        path
+        for path in checkpoint_path.glob("custom_checkpoint_*.pkl")
+        if re.match(r"^custom_checkpoint_\d+\.pkl$", path.name)
+    )
+    for candidate in candidates:
+        try:
+            payload = torch.load(candidate, map_location="cpu", weights_only=False)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        model_state = payload.get("model")
+        if isinstance(model_state, dict):
+            return model_state
+    return None
+
+
+def _load_model_weights_only(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+    *,
+    weights_source: str = "student",
+) -> str:
+    """Load model weights and return the resolved source: student or ema."""
+    source = str(weights_source).strip().lower()
+    if source not in {"student", "ema", "auto"}:
+        raise ValueError("weights_source must be one of: student, ema, auto")
+
     if checkpoint_path.is_dir():
+        if source in {"ema", "auto"}:
+            ema_state = _load_ema_state_dict_from_checkpoint_dir(checkpoint_path)
+            if ema_state is not None:
+                ema_state = adapt_state_dict_keys_for_model(model, ema_state)
+                model.load_state_dict(ema_state, strict=True)
+                return "ema"
+            if source == "ema":
+                raise FileNotFoundError(
+                    "Requested EMA init weights, but no EMA checkpoint was found "
+                    f"under: {checkpoint_path}"
+                )
+
         state_dict = _load_state_dict_from_checkpoint_dir(checkpoint_path)
         if state_dict is not None:
             state_dict = adapt_state_dict_keys_for_model(model, state_dict)
             model.load_state_dict(state_dict, strict=True)
-            return
+            return "student"
         load_checkpoint_in_model(
             model=model,
             checkpoint=str(checkpoint_path),
             strict=True,
         )
-        return
+        return "student"
 
+    if source == "ema":
+        raise ValueError(
+            "EMA init weights are only available when init_from_checkpoint points "
+            "to an Accelerate checkpoint directory."
+        )
     if checkpoint_path.suffix.lower() == ".safetensors":
         state_dict = load_safetensors_state_dict_file(checkpoint_path)
         state_dict = adapt_state_dict_keys_for_model(model, state_dict)
         model.load_state_dict(state_dict, strict=True)
-        return
+        return "student"
 
     payload = torch.load(checkpoint_path, map_location="cpu")
     if isinstance(payload, dict) and "model_state_dict" in payload:
@@ -316,6 +366,7 @@ def _load_model_weights_only(model: torch.nn.Module, checkpoint_path: Path) -> N
         )
     state_dict = adapt_state_dict_keys_for_model(model, state_dict)
     model.load_state_dict(state_dict, strict=True)
+    return "student"
 
 
 def _load_resume_state(

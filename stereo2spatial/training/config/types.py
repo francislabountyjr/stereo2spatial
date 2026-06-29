@@ -150,6 +150,7 @@ class TrainingConfig:
     validation_generation_seed: int
     validation_generation_input_path: str | None
     validation_generation_output_path: str | None
+    init_from_checkpoint_weights_source: str = "student"
     validation_generation_solver: str = "heun"
     validation_generation_solver_steps: int = 64
     validation_generation_solver_rtol: float = 1e-5
