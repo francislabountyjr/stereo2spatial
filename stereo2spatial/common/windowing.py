@@ -10,19 +10,15 @@ def segment_starts(
     window_frames: int,
     stride_frames: int,
 ) -> list[int]:
-    """Return left-aligned window starts with guaranteed tail coverage."""
+    """Return fixed-stride window starts with right-padded tail coverage."""
     if total_frames <= window_frames:
         return [0]
 
     starts = list(range(0, total_frames - window_frames + 1, stride_frames))
-    last_start = total_frames - window_frames
-    if starts[-1] == last_start:
+    if starts[-1] + window_frames >= total_frames:
         return starts
 
-    if len(starts) >= 2 and starts[-2] + window_frames >= last_start:
-        starts[-1] = last_start
-    else:
-        starts.append(last_start)
+    starts.append(starts[-1] + stride_frames)
     return starts
 
 
