@@ -14,6 +14,7 @@ starting point for new experiments instead of building configs from scratch.
 | `test_5_1_rear.yaml` | You want a 2080 Ti friendly 5.1 rear smoke run | 6-channel rear layout, smaller DiT, no compile |
 | `test_headphone_virtualizer.yaml` | You want direct binaural stereo smoke training | 2-channel headphone target, smaller DiT, no downmix loss |
 | `train_headphone_virtualizer.yaml` | You want direct binaural stereo training | 2-channel headphone target, EMA, waveform micro-patch refinement, song-local FLAC loading |
+| `train_legacy_vae.yaml` | You want the historical EAR-VAE architecture | Precomputed 64-wide latents with the current trainer and solvers |
 
 In practice:
 
@@ -28,7 +29,7 @@ Every training config resolves into these top-level sections:
 - `seed`: reproducibility seed
 - `output_dir`: run directory for checkpoints and resolved config
 - `data`: dataset paths, waveform timing, augmentation, and dataloader settings
-- `model`: SpatialDiT architecture
+- `model`: waveform or v1-compatible SpatialDiT architecture
 - `training`: training loop behavior, sequence regime, GAN, EMA, scheduled
   sampling, flow schedule, and validation
 - `optimizer`: optimizer family and hyperparameters
@@ -46,7 +47,7 @@ Important fields:
   dataset, or a list when paired with a `manifest_path` list
 - `manifest_path`: JSONL manifest describing sample directories when using one
   dataset, or a list when paired with a `dataset_root` list
-- `sample_artifact_mode`: `bundle` or `split`
+- `sample_artifact_mode`: `bundle`, `split`, or waveform-only `flac`
 - `segment_seconds`: base segment length written by preprocessing
 - `sequence_seconds`: nominal loaded sequence length
 - `stride_seconds`: stride used when walking long songs
@@ -62,7 +63,8 @@ Important fields:
 Rules worth remembering:
 
 - `mono_probability + downmix_probability` must stay `<= 1`
-- `sample_artifact_mode` must be `bundle` or `split`
+- waveform datasets accept `bundle`, `split`, or `flac`; `legacy_vae` accepts
+  precomputed latent `bundle` or `split` artifacts only
 - if multiple datasets are configured, roots and manifests are paired by list
   order and loaded into one unified segment schedule
 - `5.1 rear` uses channel order `FL, FR, FC, LFE, BL, BR` and WAVEX speaker
@@ -77,9 +79,15 @@ Rules worth remembering:
 
 Important fields:
 
+- `architecture`: `waveform` or `legacy_vae`. Historical configs containing
+  `latent_dim` but no `patch_size` select `legacy_vae` automatically.
 - `target_channels`: spatial output channel count
-- `cond_channels`: conditioning channel count; current stack expects `2`
-- `patch_size`: waveform samples per transformer patch
+- `cond_channels`: conditioning channel count; waveform presets use `2`, while
+  the historical legacy checkpoint uses `1`
+- `patch_size`: waveform samples per transformer patch for `waveform`; at
+  runtime it aliases `latent_dim` for `legacy_vae`
+- `latent_dim`: EAR-VAE feature width for `legacy_vae` (64 for the historical
+  checkpoint)
 - `hidden_dim`, `num_layers`, `num_heads`, `mlp_ratio`, `dropout`: transformer
   size controls
 - `timestep_embed_dim`, `timestep_scale`, `max_period`: timestep embedding
@@ -102,6 +110,27 @@ Important fields:
 Change `target_channels` and exported `channel_order` together if you are
 targeting a different layout.
 
+`legacy_vae` retains the fused-MHA/output-head parameter layout so historical
+checkpoints load strictly. Its velocity head is adapted to the current clean
+endpoint contract without adding parameters. It uses precomputed latent
+`bundle`/`split` datasets; amplitude lift, audio codec/resample augmentation,
+downmix-consistency, MR-STFT, perceptual, and binaural losses are waveform-only.
+Mono and downmix latent conditioning selection remain supported.
+
+Architecture selection and checkpoint migration:
+
+- Prefer an explicit canonical value: `architecture: waveform` for current
+  checkpoints or `architecture: legacy_vae` for v1 checkpoints.
+- Historical configs are migrated automatically only when `latent_dim` exists
+  and `patch_size` is absent. If both exist, set `architecture` explicitly.
+- Checkpoint state keys are inspected before loading. A waveform checkpoint
+  cannot initialize a legacy model, and a legacy checkpoint cannot initialize a
+  waveform model.
+- `resume_from_checkpoint` restores model and trainer state for a current run.
+  `init_from_checkpoint` or CLI `--init-from` loads model weights only.
+- `init_from_checkpoint_weights_source` accepts `student`, `ema`, or `auto`;
+  `auto` prefers EMA when the checkpoint contains it.
+
 ### `training`
 
 This section carries most of the high-leverage settings.
@@ -117,6 +146,7 @@ Core loop and checkpointing:
 - `max_checkpoints_to_keep`
 - `resume_from_checkpoint`
 - `init_from_checkpoint`
+- `init_from_checkpoint_weights_source`
 
 Sequence regime:
 
@@ -278,8 +308,27 @@ Set:
 - `training.validation_generation_input_path`
 - `training.validation_generation_output_path`
 
-Validation generation now runs the current waveform-patch model directly and
-writes rendered multichannel WAVs.
+Validation generation runs waveform models directly and writes rendered
+multichannel WAVs. For `legacy_vae`, also set
+`validation_generation_vae_checkpoint_path` and optionally
+`validation_generation_vae_config_path` so previews can be encoded/decoded.
+Validation previews use timestep-major inference and retain the configured
+training window for short inputs.
+
+### Fine-tune a v1 checkpoint with the current trainer
+
+Set `model.architecture: legacy_vae`, point `data` at the historical latent
+manifest, and initialize model weights without restoring the old optimizer:
+
+```bash
+python train.py \
+  --config configs/train_legacy_vae.yaml \
+  --init-from runs/old_v1/checkpoints/step_0040000
+```
+
+The v1 architecture uses EAR-VAE latents during training. The VAE itself is only
+needed for validation audio generation and inference, not when all training
+artifacts are already precomputed latents.
 
 ### Export for local inference or Hugging Face
 
@@ -290,3 +339,25 @@ python scripts/export/export_model_bundle.py --train-run-dir runs/train_stage_2 
 ```
 
 That produces the bundle format consumed directly by `infer.py`.
+
+The bundle keeps recommended inference defaults from the resolved training
+config: effective training sample rate, training window and overlap, plus the
+validation-generation solver settings. Omit the corresponding `infer.py` flags
+to use those recommendations, or pass explicit flags to override them. Legacy
+EAR-VAE bundles always use 48 kHz. Inference defaults to training-aligned
+timestep-major traversal; pass `--sampling-order window-major` only when the
+previous compatibility behavior is required.
+
+For a self-contained v1 bundle, also pass the 48 kHz EAR-VAE checkpoint and JSON
+config. Legacy export includes those assets by default and creates:
+
+```text
+config.json
+model.safetensors
+vae/ear_vae_v2_48k.pyt
+vae/ear_vae_v2.json
+```
+
+Sequential inference supports the full solver list above. Dynamic folder
+batching supports `euler`, `heun`, `midpoint_rk2`, and `res6s`, and does not
+support `training.flow_one_step: true` configs.

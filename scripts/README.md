@@ -18,7 +18,7 @@ workflow tooling around that core package.
 
 - `scripts/data/preprocess_dataset.py`
   - Preprocess raw audio into waveform training artifacts plus `manifest.jsonl`
-- `data/normalize_mix_style.py`
+- `scripts/data/normalize_mix_style.py`
   - Normalize raw target-derived mix-style controls into training conditioning vectors
   - Supports `bundle` and `split` artifact modes
 - `scripts/data/build_qc_dataset_subset.py`
@@ -48,19 +48,35 @@ workflow tooling around that core package.
   - Package a training checkpoint into:
     - `config.json`
     - `model.safetensors`
+    - optional `vae/` assets for the v1-compatible architecture
   - This is the recommended format for local inference and Hugging Face upload
 
 Example:
 
 ```bash
-python scripts/export/export_model_bundle.py --train-run-dir runs/train_with_gan --checkpoint latest --output-dir exports/stereo2spatial-v1
+python scripts/export/export_model_bundle.py --train-run-dir runs/train_with_gan --checkpoint latest --output-dir exports/stereo2spatial-waveform
 ```
 
 You can then infer directly from that exported bundle:
 
 ```bash
-python infer.py --checkpoint exports/stereo2spatial-v1 --input-audio path/to/input.wav --output-audio path/to/output_spatial.wav --device cuda
+python infer.py --checkpoint exports/stereo2spatial-waveform --input-audio path/to/input.wav --output-audio path/to/output_spatial.wav --device cuda
 ```
+
+For a self-contained v1-compatible export:
+
+```bash
+python scripts/export/export_model_bundle.py \
+  --train-run-dir runs/train_legacy_vae \
+  --checkpoint latest \
+  --output-dir exports/stereo2spatial-v1 \
+  --vae-checkpoint-path path/to/ear_vae_v2_48k.pyt \
+  --vae-config-path path/to/ear_vae_v2.json
+```
+
+That bundle adds `vae/ear_vae_v2_48k.pyt` and `vae/ear_vae_v2.json` beside the
+model files. Native PyTorch/CUDA bundle inference is the supported application
+deployment path.
 
 ## Atmos Layout Overrides
 
