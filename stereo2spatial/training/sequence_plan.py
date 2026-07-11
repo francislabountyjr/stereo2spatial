@@ -8,6 +8,7 @@ import torch
 
 from .config import TrainConfig
 from .dataset import WaveformSongDataset
+from .latent_dataset import LatentSongDataset
 from .windowing import _build_window_metadata
 
 
@@ -29,7 +30,7 @@ class SequenceTrainingPlan:
 def build_sequence_training_plan(
     *,
     config: TrainConfig,
-    dataset: WaveformSongDataset,
+    dataset: WaveformSongDataset | LatentSongDataset,
 ) -> SequenceTrainingPlan:
     """Resolve per-batch temporal slicing and overlap parameters."""
     fps = float(dataset.resolved_patch_fps)
@@ -40,7 +41,9 @@ def build_sequence_training_plan(
     seq_choices_sec = getattr(config.training, "sequence_seconds_choices", None)
     if not seq_choices_sec:
         seq_choices_sec = [float(dataset.sequence_seconds)]
-    seq_choices_frames = [max(1, int(round(float(value) * fps))) for value in seq_choices_sec]
+    seq_choices_frames = [
+        max(1, int(round(float(value) * fps))) for value in seq_choices_sec
+    ]
     max_choice_frames = max(seq_choices_frames)
 
     window_frames = max(1, int(round(float(config.training.window_seconds) * fps)))
@@ -49,7 +52,8 @@ def build_sequence_training_plan(
     window_metadata: dict[int, tuple[list[int], list[torch.Tensor]]] | None = None
     if sequence_mode != "full_song":
         window_metadata = _build_window_metadata(
-            frame_lengths=seq_choices_frames + [max_choice_frames, int(dataset.sequence_frames)],
+            frame_lengths=seq_choices_frames
+            + [max_choice_frames, int(dataset.sequence_frames)],
             window_frames=window_frames,
             overlap_frames=overlap_frames,
         )

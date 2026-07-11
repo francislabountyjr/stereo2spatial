@@ -61,6 +61,8 @@ class DataConfig:
     source_codec_aug_max_chunk_seconds: float | None = 12.0
     source_codec_aug_align_max_lag: int = 8192
     source_codec_aug_timeout_seconds: float = 20.0
+    # Legacy EAR-VAE latent frame rate. Kept separate from waveform patch FPS.
+    latent_fps: float | str = 50.0
 
 
 @dataclass
@@ -91,6 +93,10 @@ class ModelConfig:
     rope_enabled: bool = True
     rope_theta: float = 10000.0
     activation_checkpointing: bool = False
+    # ``legacy_vae`` selects the original EAR-VAE latent architecture. Historical
+    # configs without this field are detected from ``latent_dim`` vs ``patch_size``.
+    architecture: str = "waveform"
+    latent_dim: int | None = None
 
 
 @dataclass
@@ -232,6 +238,8 @@ class TrainingConfig:
     ema_decay: float = 0.999
     ema_device: str = "accelerator"
     ema_cpu_only: bool = False
+    validation_generation_vae_checkpoint_path: str | None = None
+    validation_generation_vae_config_path: str | None = None
 
 
 @dataclass

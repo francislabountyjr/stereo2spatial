@@ -311,7 +311,15 @@ def test_generate_spatial_signal_threads_memory_between_chunks(
         mem: torch.Tensor | None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        del model, cond_chunk, valid_mask, solver, solver_steps, solver_rtol, solver_atol
+        del (
+            model,
+            cond_chunk,
+            valid_mask,
+            solver,
+            solver_steps,
+            solver_rtol,
+            solver_atol,
+        )
         del kwargs
         if mem is not None:
             seen_mem_values.append(float(mem.mean().item()))
@@ -339,6 +347,54 @@ def test_generate_spatial_signal_threads_memory_between_chunks(
     assert len(seen_mem_values) == 2
     assert seen_mem_values[0] == pytest.approx(0.0)
     assert seen_mem_values[1] == pytest.approx(1.0)
+
+
+def test_generate_spatial_signal_shares_overlap_noise_and_zero_pads_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _DummySamplingModel()
+    captured_z0: list[torch.Tensor] = []
+    captured_masks: list[torch.Tensor | None] = []
+
+    def _capture_sample_chunk_signal(
+        *,
+        z0_chunk: torch.Tensor,
+        valid_mask: torch.Tensor | None,
+        mem: torch.Tensor | None,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        del kwargs
+        captured_z0.append(z0_chunk.detach().clone())
+        captured_masks.append(None if valid_mask is None else valid_mask.clone())
+        return z0_chunk, mem
+
+    monkeypatch.setattr(
+        "stereo2spatial.inference.sampling._sample_chunk_signal",
+        _capture_sample_chunk_signal,
+    )
+
+    generate_spatial_signal(
+        model=cast(Any, model),
+        cond_signal=torch.zeros(1, 3, 8),
+        chunk_frames=4,
+        overlap_frames=1,
+        solver="euler",
+        solver_steps=1,
+        solver_rtol=1e-5,
+        solver_atol=1e-5,
+        seed=123,
+    )
+
+    assert len(captured_z0) == 3
+    torch.testing.assert_close(captured_z0[0][..., -1:], captured_z0[1][..., :1])
+    torch.testing.assert_close(captured_z0[1][..., -1:], captured_z0[2][..., :1])
+    assert torch.count_nonzero(captured_z0[2][..., 2:]).item() == 0
+    assert captured_masks[0] is None
+    assert captured_masks[1] is None
+    assert torch.equal(
+        captured_masks[2],
+        torch.tensor([[True, True, False, False]]),
+    )
 
 
 def test_resolve_checkpoint_path_supports_latest_and_validates_inputs(

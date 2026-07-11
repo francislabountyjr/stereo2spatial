@@ -83,7 +83,7 @@ def _optional_path_or_path_list(value: Any) -> str | list[str] | None:
 
 
 def _coerce_dataset_paths(
-    data_raw: dict[str, Any]
+    data_raw: dict[str, Any],
 ) -> tuple[str | list[str], str | list[str]]:
     """Return dataset roots and manifests from single-path or multi-path config."""
     datasets_raw = data_raw.get("datasets")
@@ -201,7 +201,8 @@ def build_data_config(data_raw: dict[str, Any]) -> DataConfig:
         segment_seconds=float(require_key(data_raw, "segment_seconds")),
         sequence_seconds=float(require_key(data_raw, "sequence_seconds")),
         stride_seconds=float(require_key(data_raw, "stride_seconds")),
-        sample_rate=int(require_key(data_raw, "sample_rate")),
+        # Historical latent configs predate this field; EAR-VAE operates at 48 kHz.
+        sample_rate=int(data_raw.get("sample_rate", 48_000)),
         training_sample_rate=(
             None
             if data_raw.get("training_sample_rate") is None
@@ -267,15 +268,41 @@ def build_data_config(data_raw: dict[str, Any]) -> DataConfig:
         ),
         **_build_source_resample_aug_fields(data_raw),
         **_build_source_codec_aug_fields(data_raw),
+        latent_fps=data_raw.get("latent_fps", 50.0),
     )
 
 
 def build_model_config(model_raw: dict[str, Any]) -> ModelConfig:
     """Coerce the ``model`` section into :class:`ModelConfig`."""
+    architecture_raw = model_raw.get("architecture", model_raw.get("model_variant"))
+    has_patch_size = model_raw.get("patch_size") is not None
+    has_latent_dim = model_raw.get("latent_dim") is not None
+    if architecture_raw is None:
+        if has_latent_dim and not has_patch_size:
+            architecture = "legacy_vae"
+        else:
+            architecture = "waveform"
+    else:
+        architecture = str(architecture_raw).strip().lower()
+    if architecture in {"vae", "latent", "vae_latent", "ear_vae_latent_v1"}:
+        architecture = "legacy_vae"
+    elif architecture in {"no_vae", "waveform_patch", "waveform_dit"}:
+        architecture = "waveform"
+
+    feature_size_raw = (
+        model_raw.get("latent_dim")
+        if architecture == "legacy_vae"
+        else model_raw.get("patch_size")
+    )
+    if feature_size_raw is None:
+        required_name = "latent_dim" if architecture == "legacy_vae" else "patch_size"
+        raise KeyError(f"Missing required config key: {required_name}")
     return ModelConfig(
         target_channels=int(require_key(model_raw, "target_channels")),
         cond_channels=int(require_key(model_raw, "cond_channels")),
-        patch_size=int(require_key(model_raw, "patch_size")),
+        # ``patch_size`` is the shared feature-axis width at runtime. For legacy
+        # models it aliases latent_dim so generic window/sampler code can be reused.
+        patch_size=int(feature_size_raw),
         hidden_dim=int(require_key(model_raw, "hidden_dim")),
         num_layers=int(require_key(model_raw, "num_layers")),
         num_heads=int(require_key(model_raw, "num_heads")),
@@ -303,6 +330,12 @@ def build_model_config(model_raw: dict[str, Any]) -> ModelConfig:
         rope_enabled=bool(model_raw.get("rope_enabled", True)),
         rope_theta=float(model_raw.get("rope_theta", 10000.0)),
         activation_checkpointing=bool(model_raw.get("activation_checkpointing", False)),
+        architecture=architecture,
+        latent_dim=(
+            int(model_raw.get("latent_dim", feature_size_raw))
+            if architecture == "legacy_vae"
+            else None
+        ),
     )
 
 
@@ -321,7 +354,9 @@ def _build_training_checkpoint_fields(training_raw: dict[str, Any]) -> dict[str,
         ),
         "init_from_checkpoint_weights_source": str(
             training_raw.get("init_from_checkpoint_weights_source", "student")
-        ).strip().lower(),
+        )
+        .strip()
+        .lower(),
     }
 
 
@@ -548,6 +583,12 @@ def _build_training_validation_fields(training_raw: dict[str, Any]) -> dict[str,
         ),
         "validation_generation_output_path": optional_str(
             training_raw.get("validation_generation_output_path")
+        ),
+        "validation_generation_vae_checkpoint_path": optional_str(
+            training_raw.get("validation_generation_vae_checkpoint_path")
+        ),
+        "validation_generation_vae_config_path": optional_str(
+            training_raw.get("validation_generation_vae_config_path")
         ),
         "validation_generation_solver": str(
             training_raw.get("validation_generation_solver", "heun")

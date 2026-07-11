@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from torch.utils.data import Sampler
 
 from .dataset import WaveformSongDataset
+from .latent_dataset import LatentSongDataset
 
 
 class SongLocalBatchSampler(Sampler[list[int]]):
@@ -22,7 +23,7 @@ class SongLocalBatchSampler(Sampler[list[int]]):
 
     def __init__(
         self,
-        dataset: WaveformSongDataset,
+        dataset: WaveformSongDataset | LatentSongDataset,
         *,
         batch_size: int,
         num_workers: int,

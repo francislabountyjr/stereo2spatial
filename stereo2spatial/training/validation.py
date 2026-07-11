@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import torch
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
+from stereo2spatial.modeling import is_legacy_vae_model
+
 from .config import TrainConfig
 from .dataset import WaveformSongDataset
 from .ema import EMATeacher
+from .latent_dataset import LatentSongDataset
 from .losses import _compute_batch_flow_matching_loss
 
 _AUDIO_SUFFIXES = {".wav", ".flac", ".aif", ".aiff", ".ogg", ".mp3", ".m4a"}
@@ -18,14 +22,34 @@ _AUDIO_SUFFIXES = {".wav", ".flac", ".aif", ".aiff", ".ogg", ".mp3", ".m4a"}
 
 def _build_validation_dataset(
     config: TrainConfig,
-    training_dataset: WaveformSongDataset,
-) -> WaveformSongDataset:
+    training_dataset: WaveformSongDataset | LatentSongDataset,
+) -> WaveformSongDataset | LatentSongDataset:
     """Construct validation dataset mirroring training sequence/window semantics."""
     validation_dataset_root = config.training.validation_dataset_root
     validation_dataset_path = config.training.validation_dataset_path
     if validation_dataset_root is None or validation_dataset_path is None:
         raise ValueError(
             "Validation dataset root/path are required when run_validation is enabled."
+        )
+
+    if is_legacy_vae_model(config):
+        return LatentSongDataset(
+            dataset_root=validation_dataset_root,
+            manifest_path=validation_dataset_path,
+            sample_artifact_mode=config.data.sample_artifact_mode,
+            segment_seconds=config.data.segment_seconds,
+            latent_fps=config.data.latent_fps,
+            mono_probability=0.0,
+            downmix_probability=0.0,
+            cache_size=config.data.cache_size,
+            shuffle_segments_within_epoch=False,
+            shuffle_segments_within_song=False,
+            seed=config.seed + 100_000,
+            sample_exclusion_path=cast(Any, config.data.sample_exclusion_path),
+            sequence_seconds=training_dataset.sequence_seconds,
+            stride_seconds=training_dataset.stride_seconds,
+            sequence_mode=training_dataset.sequence_mode,
+            full_song_max_seconds=training_dataset.full_song_max_seconds,
         )
 
     effective_sample_rate = int(
@@ -223,6 +247,12 @@ def _run_generation_validation(
     ema_teacher: EMATeacher | None = None,
 ) -> tuple[int, int]:
     """Run periodic audio generation validation and return success/error counts."""
+    from stereo2spatial.codecs.ear_vae import (
+        decode_channels_independent,
+        encode_channels_independent,
+        load_vae,
+        vae_encode,
+    )
     from stereo2spatial.common.amplitude_lift import (
         amplitude_lift_log_gain,
         apply_amplitude_lift,
@@ -236,14 +266,15 @@ def _run_generation_validation(
         write_audio_channels_first,
     )
     from stereo2spatial.inference.runner import (
+        RequestedSolverName,
         _patch_audio,
         _prepare_conditioning_audio,
         _resolve_inference_solver,
         _unpatch_audio,
     )
-    from stereo2spatial.inference.sampling import (
-        generate_spatial_signal,
-        resolve_chunk_frames,
+    from stereo2spatial.inference.sampling import resolve_chunk_frames
+    from stereo2spatial.inference.timestep_sampling import (
+        generate_spatial_signal_timestep_major,
     )
 
     input_root = Path(config.training.validation_generation_input_path or "")
@@ -265,6 +296,24 @@ def _run_generation_validation(
         except StopIteration:
             model_device = accelerator.device
 
+        legacy_vae = is_legacy_vae_model(config)
+        vae: torch.nn.Module | None = None
+        if legacy_vae:
+            vae_checkpoint_path = (
+                config.training.validation_generation_vae_checkpoint_path
+            )
+            if vae_checkpoint_path is None:
+                raise ValueError(
+                    "validation_generation_vae_checkpoint_path is required for "
+                    "legacy_vae validation generation"
+                )
+            vae = load_vae(
+                vae_checkpoint_path=vae_checkpoint_path,
+                config_path=config.training.validation_generation_vae_config_path,
+                device=model_device,
+                torch_dtype=torch.float32,
+            )
+
         sample_rate = int(
             getattr(config.data, "training_sample_rate", None)
             or config.data.sample_rate
@@ -276,7 +325,10 @@ def _run_generation_validation(
         )
         overlap_seconds = float(config.training.validation_generation_overlap_seconds)
         solver = _resolve_inference_solver(
-            requested_solver=config.training.validation_generation_solver
+            requested_solver=cast(
+                RequestedSolverName,
+                config.training.validation_generation_solver,
+            )
         )
         solver_steps = int(config.training.validation_generation_solver_steps)
         solver_rtol = float(config.training.validation_generation_solver_rtol)
@@ -298,9 +350,13 @@ def _run_generation_validation(
                         audio_path=input_audio_path,
                         target_sample_rate=sample_rate,
                     )
-                    conditioning_audio = _prepare_conditioning_audio(
-                        audio.float(),
-                        cond_channels=int(config.model.cond_channels),
+                    conditioning_audio = (
+                        audio.float()
+                        if legacy_vae
+                        else _prepare_conditioning_audio(
+                            audio.float(),
+                            cond_channels=int(config.model.cond_channels),
+                        )
                     )
                     amplitude_lift_gain = None
                     amplitude_lift_log_gain_tensor: torch.Tensor | None = None
@@ -417,21 +473,64 @@ def _run_generation_validation(
                                     getattr(config.data, "amplitude_lift_eps", 1.0e-8)
                                 ),
                             ).to(model_device)
-                    cond_signal, input_samples = _patch_audio(
-                        conditioning_audio,
-                        patch_size=int(config.model.patch_size),
-                    )
-                    patch_fps = float(actual_sample_rate) / float(
-                        config.model.patch_size
+                    input_samples = int(conditioning_audio.shape[-1])
+                    if legacy_vae:
+                        if vae is None:
+                            raise RuntimeError("legacy validation VAE was not loaded")
+                        if int(config.model.cond_channels) == 1:
+                            encoded = vae_encode(
+                                vae=vae,
+                                audio=conditioning_audio,
+                                sample_rate=actual_sample_rate,
+                                use_sample=False,
+                                use_chunked_encode=True,
+                                duplicate_mono_to_stereo=True,
+                                offload_latent_to_cpu=False,
+                                device=model_device,
+                            )
+                            cond_signal = encoded.unsqueeze(0).contiguous()
+                        else:
+                            cond_signal = encode_channels_independent(
+                                vae=vae,
+                                audio=_prepare_conditioning_audio(
+                                    conditioning_audio,
+                                    cond_channels=int(config.model.cond_channels),
+                                ),
+                                sample_rate=actual_sample_rate,
+                                use_sample=False,
+                                use_chunked_encode=True,
+                                offload_latent_to_cpu=False,
+                                device=model_device,
+                            )
+                        latent_fps = getattr(config.data, "latent_fps", 50.0)
+                        patch_fps = (
+                            50.0
+                            if str(latent_fps).strip().lower() == "auto"
+                            else float(latent_fps)
+                        )
+                    else:
+                        cond_signal, input_samples = _patch_audio(
+                            conditioning_audio,
+                            patch_size=int(config.model.patch_size),
+                        )
+                        patch_fps = float(actual_sample_rate) / float(
+                            config.model.patch_size
+                        )
+                    requested_chunk_frames = max(
+                        1,
+                        int(round(chunk_seconds * patch_fps)),
                     )
                     chunk_frames, overlap_frames = resolve_chunk_frames(
-                        cond_signal_frames=cond_signal.shape[-1],
+                        cond_signal_frames=max(
+                            int(cond_signal.shape[-1]),
+                            requested_chunk_frames,
+                        ),
                         patch_fps=patch_fps,
                         chunk_seconds=chunk_seconds,
                         overlap_seconds=overlap_seconds,
                     )
 
-                    pred_signal = generate_spatial_signal(
+                    pred_signal = generate_spatial_signal_timestep_major(
                         model=raw_model,
                         cond_signal=cond_signal.to(model_device),
                         chunk_frames=chunk_frames,
@@ -447,10 +546,25 @@ def _run_generation_validation(
                             getattr(config.training, "flow_one_step_input", "zeros")
                         ),
                     )
-                    decoded = _unpatch_audio(
-                        pred_signal.cpu().float(),
-                        sample_count=input_samples,
-                    )
+                    if legacy_vae:
+                        assert vae is not None
+                        decoded = decode_channels_independent(
+                            vae=vae,
+                            channel_latents=pred_signal.to(
+                                model_device, dtype=torch.float32
+                            ),
+                            use_chunked_decode=True,
+                            chunk_size_frames=2048,
+                            overlap_frames=256,
+                            offload_wav_to_cpu=True,
+                            reduction="mean",
+                            device=model_device,
+                        )[:, :input_samples]
+                    else:
+                        decoded = _unpatch_audio(
+                            pred_signal.cpu().float(),
+                            sample_count=input_samples,
+                        )
                     if amplitude_lift_gain is not None:
                         if amplitude_lift_mode == "wavflow":
                             decoded = undo_wavflow_output_lift(

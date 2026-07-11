@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 
 from .config import TrainConfig
 from .dataset import WaveformSongDataset
+from .latent_dataset import LatentSongDataset
 from .song_local_sampler import SongLocalBatchSampler
 
 try:
@@ -60,7 +61,7 @@ def _disable_inductor_cudagraphs_if_possible() -> None:
 
 
 def _create_dataloader(
-    dataset: WaveformSongDataset,
+    dataset: WaveformSongDataset | LatentSongDataset,
     config: TrainConfig,
     drop_last: bool | None = None,
     for_training: bool = False,

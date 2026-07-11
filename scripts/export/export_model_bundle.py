@@ -60,9 +60,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sample-rate",
         type=int,
-        default=48000,
-        help="Nominal audio sample rate recorded in the bundle metadata.",
+        default=None,
+        help=(
+            "Recommended inference sample rate. Defaults to data.training_sample_rate "
+            "when set, otherwise data.sample_rate. Legacy EAR-VAE bundles are fixed "
+            "at 48000 Hz."
+        ),
     )
+    parser.add_argument(
+        "--include-vae",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Bundle EAR-VAE assets. Defaults to true for legacy_vae and false "
+            "for waveform models."
+        ),
+    )
+    parser.add_argument("--vae-checkpoint-path", type=Path, default=None)
+    parser.add_argument("--vae-config-path", type=Path, default=None)
     return parser
 
 
@@ -78,6 +93,9 @@ def main() -> None:
             list(args.channel_order) if args.channel_order is not None else None
         ),
         sample_rate=args.sample_rate,
+        include_vae=args.include_vae,
+        vae_checkpoint_path=args.vae_checkpoint_path,
+        vae_config_path=args.vae_config_path,
     )
 
     print("Export complete:")
@@ -85,6 +103,10 @@ def main() -> None:
     print(f"  - checkpoint_path={result.checkpoint_path}")
     print(f"  - weights_source={result.weights_source}")
     print(f"  - config_path={result.config_path}")
+    if result.vae_checkpoint_path is not None:
+        print(f"  - vae_checkpoint_path={result.vae_checkpoint_path}")
+    if result.vae_config_path is not None:
+        print(f"  - vae_config_path={result.vae_config_path}")
 
 
 if __name__ == "__main__":

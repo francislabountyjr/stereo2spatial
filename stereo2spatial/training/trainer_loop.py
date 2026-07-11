@@ -19,6 +19,7 @@ from .checkpointing import _save_checkpoint
 from .config import TrainConfig
 from .dataset import ConditioningSource, WaveformSongDataset
 from .ema import EMATeacher
+from .latent_dataset import LatentSongDataset
 from .sequence_plan import SequenceTrainingPlan
 from .trainer_metrics import (
     RunningLossState,
@@ -115,7 +116,9 @@ def _should_run_validation(
     global_step: int,
 ) -> bool:
     """Return True when the current step matches validation cadence."""
-    return settings.validation_steps > 0 and global_step % settings.validation_steps == 0
+    return (
+        settings.validation_steps > 0 and global_step % settings.validation_steps == 0
+    )
 
 
 def _update_latest_averages(
@@ -146,7 +149,7 @@ def run_training_loop(
     accelerator: Accelerator,
     config: TrainConfig,
     output_dir: Path,
-    dataset: WaveformSongDataset,
+    dataset: WaveformSongDataset | LatentSongDataset,
     dataloader: DataLoader,
     validation_dataloader: DataLoader | None,
     model: torch.nn.Module,
@@ -244,9 +247,7 @@ def run_training_loop(
                     f"T_eff={t_eff} windows={num_windows}"
                 )
                 if step_result.grad_norm is not None:
-                    message += (
-                        f" grad_norm={float(step_result.grad_norm.detach().float().cpu().item())}"
-                    )
+                    message += f" grad_norm={float(step_result.grad_norm.detach().float().cpu().item())}"
                 _log_main(
                     accelerator=accelerator,
                     progress_bar=progress_bar,

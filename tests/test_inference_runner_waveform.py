@@ -155,7 +155,9 @@ def test_prepare_conditioning_audio_maps_mono_and_stereo() -> None:
     mono = torch.arange(5, dtype=torch.float32).unsqueeze(0)
     stereo = torch.stack([torch.zeros(5), torch.ones(5)], dim=0)
 
-    assert torch.equal(_prepare_conditioning_audio(mono, cond_channels=2), mono.expand(2, -1))
+    assert torch.equal(
+        _prepare_conditioning_audio(mono, cond_channels=2), mono.expand(2, -1)
+    )
     assert torch.equal(_prepare_conditioning_audio(mono, cond_channels=1), mono)
     assert torch.equal(
         _prepare_conditioning_audio(stereo, cond_channels=1),
@@ -198,7 +200,11 @@ def test_resolve_inference_mix_style_rejects_preset_and_json() -> None:
         )
 
 
-def test_run_inference_writes_direct_waveform_output(tmp_path: Path) -> None:
+@pytest.mark.parametrize("sampling_order", ["window_major", "timestep_major"])
+def test_run_inference_writes_direct_waveform_output(
+    tmp_path: Path,
+    sampling_order: str,
+) -> None:
     config = _tiny_config(tmp_path)
     model = SpatialDiT(
         target_channels=config.model.target_channels,
@@ -218,7 +224,7 @@ def test_run_inference_writes_direct_waveform_output(tmp_path: Path) -> None:
     torch.save({"model_state_dict": model.state_dict()}, checkpoint_path)
 
     input_audio_path = tmp_path / "input.wav"
-    output_audio_path = tmp_path / "output.wav"
+    output_audio_path = tmp_path / f"output_{sampling_order}.wav"
     input_audio = torch.randn(2, 24)
     write_audio_channels_first(
         audio_path=input_audio_path,
@@ -243,6 +249,7 @@ def test_run_inference_writes_direct_waveform_output(tmp_path: Path) -> None:
         show_progress=False,
         normalize_peak=False,
         weights_source="student",
+        sampling_order=sampling_order,
     )
 
     output_audio, output_sample_rate = read_audio_channels_first(
@@ -255,6 +262,7 @@ def test_run_inference_writes_direct_waveform_output(tmp_path: Path) -> None:
     assert report["pred_signal_shape"] == [2, 8, 3]
     assert report["decoded_shape"] == [2, 24]
     assert report["patch_fps"] == 1000.0
+    assert report["sampling_order"] == sampling_order
 
 
 def test_run_inference_reports_amplitude_lift_gain(tmp_path: Path) -> None:

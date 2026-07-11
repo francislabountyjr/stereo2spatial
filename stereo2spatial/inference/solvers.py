@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 import torch
 
 SolverName = str
-_CLEAN_PREDICTION_EPS = 1e-4
-_INTEGRATION_T_END = 1.0 - _CLEAN_PREDICTION_EPS
+CLEAN_PREDICTION_EPS = 1.0e-4
+INTEGRATION_T_END = 1.0 - CLEAN_PREDICTION_EPS
 
 
 @dataclass(frozen=True)
@@ -32,7 +31,7 @@ class ModelQuery:
 
 
 class SolverController(Protocol):
-    """State machine that turns model predictions into a solved window."""
+    """State machine that integrates clean predictions into an accepted state."""
 
     def next_query(self) -> ModelQuery | None:
         """Return the next model query needed by this controller."""
@@ -48,11 +47,11 @@ class SolverController(Protocol):
 
     @property
     def is_done(self) -> bool:
-        """Whether the controller has completed its window."""
+        """Whether the controller has completed its integration state."""
         ...
 
     def result(self) -> torch.Tensor:
-        """Return the final clean window prediction."""
+        """Return the final accepted clean prediction."""
         ...
 
 
@@ -62,82 +61,46 @@ def clean_prediction_to_velocity(
     t_value: float,
 ) -> torch.Tensor:
     """Convert a clean endpoint prediction into rectified-flow velocity."""
-    denom = max(1.0 - float(t_value), _CLEAN_PREDICTION_EPS)
+    denom = max(1.0 - float(t_value), CLEAN_PREDICTION_EPS)
     return (clean_prediction - z_state) / denom
 
 
-def _phi_series(j: int, z: float, terms: int = 24) -> float:
-    total = 0.0
-    z_power = 1.0
-    for term_idx in range(terms):
-        total += z_power / math.factorial(term_idx + j)
-        z_power *= z
-    return total
+def res6s_tableau(
+    step_size: float,
+) -> tuple[list[float], list[list[float]], list[float]]:
+    """Return a consistent six-stage RK tableau for the ``res6s`` API.
 
+    The historical implementation copied an exponential-integrator tableau but
+    applied it as a generic explicit Runge--Kutta method. Its weights summed to
+    ``phi_1(-h)`` rather than one, so even a constant velocity field was integrated
+    incorrectly. ``res6s`` now composes two Bogacki--Shampine RK3 half-steps into
+    one six-stage third-order step. This is valid for a generic rectified-flow ODE,
+    and its largest stage time is ``7/8`` so clean-to-velocity conversion never
+    probes the ill-conditioned end of a step.
 
-def _phi(j: int, z: float) -> float:
-    if j <= 0:
-        raise ValueError("j must be positive")
-    if abs(z) < 1.0e-4:
-        return _phi_series(j, z)
-    remainder = sum((z**k) / math.factorial(k) for k in range(j))
-    return (math.exp(z) - remainder) / (z**j)
+    ``step_size`` remains part of the public API even though an ordinary RK
+    tableau is step-size independent.
+    """
+    if float(step_size) <= 0.0:
+        raise ValueError("step_size must be > 0")
 
-
-def res6s_tableau(step_size: float) -> tuple[list[float], list[list[float]], list[float]]:
-    """Return the RES4LYF res_6s exponential RK tableau for one time step."""
-    h = float(step_size)
-    c1, c2, c3, c4, c5, c6 = 0.0, 0.5, 0.5, 1.0 / 3.0, 1.0 / 3.0, 5.0 / 6.0
-    c = [c1, c2, c3, c4, c5, c6]
-
-    def phi_at(j: int, stage_index: int | None = None) -> float:
-        if stage_index is None:
-            stage_c = 1.0
-        else:
-            stage_c = c[stage_index]
-            if stage_c == 0.0:
-                return 0.0
-        return _phi(j, -h * stage_c)
-
-    a3_2 = (c3**2 / c2) * phi_at(2, 2)
-
-    a4_2 = (c4**2 / c2) * phi_at(2, 3)
-    a4_3 = (c4**2 * phi_at(2, 3) - a4_2 * c2) / c3
-
-    a5_2 = 0.0
-    a5_3 = (
-        -c4 * c5**2 * phi_at(2, 4) + 2.0 * c5**3 * phi_at(3, 4)
-    ) / (c3 * (c3 - c4))
-    a5_4 = (
-        -c3 * c5**2 * phi_at(2, 4) + 2.0 * c5**3 * phi_at(3, 4)
-    ) / (c4 * (c4 - c3))
-
-    a6_2 = 0.0
-    a6_3 = (
-        -c4 * c6**2 * phi_at(2, 5) + 2.0 * c6**3 * phi_at(3, 5)
-    ) / (c3 * (c3 - c4))
-    a6_4 = (
-        -c3 * c6**2 * phi_at(2, 5) + 2.0 * c6**3 * phi_at(3, 5)
-    ) / (c4 * (c4 - c3))
-    a6_5 = (c6**2 * phi_at(2, 5) - a6_3 * c3 - a6_4 * c4) / c5
-
-    b2 = b3 = b4 = 0.0
-    b5 = (-c6 * phi_at(2) + 2.0 * phi_at(3)) / (c5 * (c5 - c6))
-    b6 = (-c5 * phi_at(2) + 2.0 * phi_at(3)) / (c6 * (c6 - c5))
-
+    c = [0.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 2.0, 3.0 / 4.0, 7.0 / 8.0]
     a = [
         [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, a3_2, 0.0, 0.0, 0.0, 0.0],
-        [0.0, a4_2, a4_3, 0.0, 0.0, 0.0],
-        [0.0, a5_2, a5_3, a5_4, 0.0, 0.0],
-        [0.0, a6_2, a6_3, a6_4, a6_5, 0.0],
+        [1.0 / 4.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 3.0 / 8.0, 0.0, 0.0, 0.0, 0.0],
+        [1.0 / 9.0, 1.0 / 6.0, 2.0 / 9.0, 0.0, 0.0, 0.0],
+        [1.0 / 9.0, 1.0 / 6.0, 2.0 / 9.0, 1.0 / 4.0, 0.0, 0.0],
+        [
+            1.0 / 9.0,
+            1.0 / 6.0,
+            2.0 / 9.0,
+            0.0,
+            3.0 / 8.0,
+            0.0,
+        ],
     ]
-    b = [0.0, b2, b3, b4, b5, b6]
-
-    for row_idx, stage_c in enumerate(c):
-        a[row_idx][0] = stage_c * phi_at(1, row_idx) - sum(a[row_idx])
-    b[0] = phi_at(1) - sum(b)
+    b = [1.0 / 9.0, 1.0 / 6.0, 2.0 / 9.0, 1.0 / 9.0, 1.0 / 6.0, 2.0 / 9.0]
     return c, a, b
 
 
@@ -177,7 +140,9 @@ def stack_model_queries(queries: list[ModelQuery]) -> dict[str, Any]:
         if query.z_cond.shape[0] != 1:
             raise ValueError("query.z_cond must include a singleton batch dimension")
         if query.valid_mask is not None and query.valid_mask.shape[0] != 1:
-            raise ValueError("query.valid_mask must include a singleton batch dimension")
+            raise ValueError(
+                "query.valid_mask must include a singleton batch dimension"
+            )
         if query.zt.shape[2:] != first.zt.shape[2:]:
             raise ValueError("all queries must share target patch/window shape")
         if query.z_cond.shape[2:] != first.z_cond.shape[2:]:
@@ -195,7 +160,10 @@ def stack_model_queries(queries: list[ModelQuery]) -> dict[str, Any]:
     _require_same_optional("mix_style")
     _require_same_optional("amplitude_gain")
     first_cache_present = first.conditioning_cache is not None
-    if any((query.conditioning_cache is not None) != first_cache_present for query in queries):
+    if any(
+        (query.conditioning_cache is not None) != first_cache_present
+        for query in queries
+    ):
         raise ValueError("all queries must agree on conditioning_cache presence")
 
     batch = {
@@ -203,7 +171,9 @@ def stack_model_queries(queries: list[ModelQuery]) -> dict[str, Any]:
         "z_cond": torch.cat([query.z_cond for query in queries], dim=0),
         "t": torch.tensor(
             [float(query.t_value) for query in queries],
-            dtype=first.zt.dtype,
+            # Time remains float32 even when model activations use fp16/bf16 so
+            # values just below one do not round to the singular endpoint.
+            dtype=torch.float32,
             device=first.zt.device,
         ),
     }
@@ -266,13 +236,14 @@ def _stack_optional_rope(
     return first
 
 
-def _stack_tensor_dicts(items: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+def _stack_tensor_dicts(
+    items: list[dict[str, torch.Tensor]],
+) -> dict[str, torch.Tensor]:
     keys = set(items[0])
     if any(set(item) != keys for item in items):
         raise ValueError("all cached tensor dicts must share keys")
     return {
-        key: torch.cat([item[key] for item in items], dim=0)
-        for key in sorted(keys)
+        key: torch.cat([item[key] for item in items], dim=0) for key in sorted(keys)
     }
 
 
@@ -294,9 +265,7 @@ def _stack_conditioning_caches(
             [cache["frame_keep_mask"] for cache in caches]
         ),
         "rope_x": _stack_optional_rope([cache["rope_x"] for cache in caches]),
-        "rope_frames": _stack_optional_rope(
-            [cache["rope_frames"] for cache in caches]
-        ),
+        "rope_frames": _stack_optional_rope([cache["rope_frames"] for cache in caches]),
         "transformer_caches": [
             _stack_tensor_dicts(layer_items)
             for layer_items in zip(
@@ -309,10 +278,7 @@ def _stack_conditioning_caches(
     }
     if "waveform_cond_tokens" in caches[0]:
         result["waveform_cond_tokens"] = torch.cat(
-            [
-                cast(torch.Tensor, cache["waveform_cond_tokens"])
-                for cache in caches
-            ],
+            [cast(torch.Tensor, cache["waveform_cond_tokens"]) for cache in caches],
             dim=0,
         )
         result["waveform_rope_self"] = _stack_optional_rope(
@@ -384,7 +350,7 @@ class FixedStepSolverController:
         self.mix_style = mix_style
         self.amplitude_gain = amplitude_gain
         self.conditioning_cache = conditioning_cache
-        self.dt = _INTEGRATION_T_END / float(self.solver_steps)
+        self.dt = INTEGRATION_T_END / float(self.solver_steps)
         self.z_state = z0_chunk
         self.step_idx = 0
         self.query_index = 0
@@ -420,16 +386,8 @@ class FixedStepSolverController:
         if self._phase == "final_clean":
             query = self._make_query(
                 zt=self.z_state,
-                t_value=_INTEGRATION_T_END,
-                return_mem=False,
-            )
-        elif self._phase == "memory_update":
-            if self._result is None:
-                raise RuntimeError("memory update requested before final result")
-            query = self._make_query(
-                zt=self._result,
-                t_value=_INTEGRATION_T_END,
-                return_mem=True,
+                t_value=INTEGRATION_T_END,
+                return_mem=self.mem is not None,
             )
         elif self.solver == "euler":
             query = self._make_query(
@@ -459,15 +417,15 @@ class FixedStepSolverController:
             raise RuntimeError("accept_output called before next_query")
         query = self._last_query
 
-        if query.return_mem:
-            self.mem_out = None if mem_out is None else mem_out.clone()
-            self._phase = "done"
-            self._last_query = None
-            return
-
         if self._phase == "final_clean":
             self._result = clean_prediction.clone()
-            self._phase = "done" if self.mem is None else "memory_update"
+            if query.return_mem:
+                if mem_out is None:
+                    raise RuntimeError(
+                        "final clean query requested memory but returned none"
+                    )
+                self.mem_out = mem_out.clone()
+            self._phase = "done"
             self._last_query = None
             return
 
@@ -527,10 +485,12 @@ class FixedStepSolverController:
         if self._phase == "heun_v1":
             if self._heun_z_start is None or self._heun_v0 is None:
                 raise RuntimeError("heun_v1 requested before v0")
-            z_euler = self._heun_z_start + self.dt * self._heun_v0
+            terminal_step = self.step_idx == self.solver_steps - 1
+            stage_fraction = 0.5 if terminal_step else 1.0
+            z_euler = self._heun_z_start + stage_fraction * self.dt * self._heun_v0
             return self._make_query(
                 zt=z_euler,
-                t_value=float(self.step_idx + 1) * self.dt,
+                t_value=(float(self.step_idx) + stage_fraction) * self.dt,
                 return_mem=False,
             )
         raise RuntimeError(f"Unexpected heun phase: {self._phase}")
@@ -559,7 +519,13 @@ class FixedStepSolverController:
             query.zt,
             query.t_value,
         )
-        self.z_state = self._heun_z_start + 0.5 * self.dt * (self._heun_v0 + v1)
+        if self.step_idx == self.solver_steps - 1:
+            # The clean-to-velocity conversion is ill-conditioned as t -> 1.
+            # Use midpoint RK2 for the terminal step so the final velocity probe
+            # stays half a step away while preserving second-order accuracy.
+            self.z_state = self._heun_z_start + self.dt * v1
+        else:
+            self.z_state = self._heun_z_start + 0.5 * self.dt * (self._heun_v0 + v1)
         self._heun_z_start = None
         self._heun_v0 = None
         self._phase = "velocity"
@@ -581,7 +547,7 @@ class FixedStepSolverController:
                 zt=z_mid,
                 t_value=min(
                     (float(self.step_idx) + 0.5) * self.dt,
-                    _INTEGRATION_T_END,
+                    INTEGRATION_T_END,
                 ),
                 return_mem=False,
             )
@@ -627,7 +593,7 @@ class FixedStepSolverController:
                 self._res_a[stage_idx][:stage_idx],
                 self._res_velocities,
             )
-        t_stage = min(t_base + self._res_c[stage_idx] * self.dt, _INTEGRATION_T_END)
+        t_stage = min(t_base + self._res_c[stage_idx] * self.dt, INTEGRATION_T_END)
         return self._make_query(
             zt=z_stage,
             t_value=t_stage,

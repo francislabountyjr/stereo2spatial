@@ -34,6 +34,11 @@ class SpatialDiT(nn.Module):
     - optionally (velocity, mem_out) when return_mem=True
     """
 
+    architecture = "waveform"
+    representation = "waveform"
+    raw_prediction_type = "sample"
+    prediction_type = "sample"
+
     def __init__(
         self,
         target_channels: int,
@@ -657,8 +662,7 @@ class SpatialDiT(nn.Module):
         mem: torch.Tensor | None = None,
         return_mem: Literal[False] = False,
         conditioning_cache: dict[str, object] | None = None,
-    ) -> torch.Tensor:
-        ...
+    ) -> torch.Tensor: ...
 
     @overload
     def forward(
@@ -673,8 +677,7 @@ class SpatialDiT(nn.Module):
         mem: torch.Tensor | None = None,
         return_mem: Literal[True] = True,
         conditioning_cache: dict[str, object] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        ...
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
     def forward(
         self,
@@ -866,9 +869,7 @@ class SpatialDiT(nn.Module):
         for block_index, block in enumerate(self.blocks):
             transformer_block = cast(TransformerBlock, block)
             transformer_cache = (
-                None
-                if transformer_caches is None
-                else transformer_caches[block_index]
+                None if transformer_caches is None else transformer_caches[block_index]
             )
             if self._should_checkpoint():
                 x_all = checkpoint(

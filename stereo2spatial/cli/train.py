@@ -11,7 +11,10 @@ from stereo2spatial.training.trainer import train
 def build_parser() -> argparse.ArgumentParser:
     """Build the training CLI argument parser."""
     parser = argparse.ArgumentParser(
-        description=("Train the stereo-to-spatial waveform-patch transformer model.")
+        description=(
+            "Train the configured stereo-to-spatial model: waveform patches or "
+            "the v1-compatible EAR-VAE latent architecture."
+        )
     )
     parser.add_argument(
         "--config",

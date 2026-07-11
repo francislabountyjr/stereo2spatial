@@ -20,8 +20,14 @@ from stereo2spatial.inference.cuda_graphs import (
 )
 from stereo2spatial.inference.export_bundle import (
     DEFAULT_BUNDLE_OVERLAP_SECONDS,
+    DEFAULT_BUNDLE_SOLVER,
+    DEFAULT_BUNDLE_SOLVER_ATOL,
+    DEFAULT_BUNDLE_SOLVER_RTOL,
+    DEFAULT_BUNDLE_SOLVER_STEPS,
+    LEGACY_VAE_SAMPLE_RATE,
     build_train_config_from_bundle_payload,
     load_inference_bundle_payload,
+    resolve_bundle_vae_paths,
     resolve_inference_config_path,
 )
 from stereo2spatial.inference.offline_batch import (
@@ -36,6 +42,7 @@ from stereo2spatial.inference.runner import (
     run_inference_with_session,
 )
 from stereo2spatial.inference.sdpa import SDPABackendName, sdpa_backend_context
+from stereo2spatial.modeling import is_legacy_vae_model
 from stereo2spatial.training.config import TrainConfig, load_config
 
 SOLVER_CHOICES = (
@@ -124,6 +131,10 @@ def _resolve_runtime_arg(
         )
         if isinstance(section, dict) and key in section:
             return section[key]
+        # Older bundles stored runtime values at the top level. Keep accepting
+        # those values while new bundles group their recommendations together.
+        if key in bundle_payload:
+            return bundle_payload[key]
     return fallback
 
 
@@ -254,15 +265,68 @@ def _add_model_and_io_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_vae_args(parser: argparse.ArgumentParser) -> None:
+    """Register optional EAR-VAE paths and chunk controls for legacy models."""
+    parser.add_argument(
+        "--vae-checkpoint-path",
+        default=None,
+        help=(
+            "EAR-VAE checkpoint for legacy_vae models. Defaults to the vae/ asset "
+            "inside an exported bundle when present."
+        ),
+    )
+    parser.add_argument(
+        "--vae-config-path",
+        default=None,
+        help="Optional EAR-VAE JSON config path.",
+    )
+    parser.add_argument(
+        "--encode-chunk-size-samples",
+        type=int,
+        default=None,
+        help=(
+            "Legacy EAR-VAE encode chunk length in audio samples. Defaults to a "
+            "VRAM-aware codec value."
+        ),
+    )
+    parser.add_argument(
+        "--encode-overlap-samples",
+        type=int,
+        default=None,
+        help="Legacy EAR-VAE encode overlap in audio samples.",
+    )
+    parser.add_argument(
+        "--decode-chunk-size-frames",
+        type=int,
+        default=2048,
+        help="Legacy EAR-VAE decode chunk length in latent frames.",
+    )
+    parser.add_argument(
+        "--decode-overlap-frames",
+        type=int,
+        default=256,
+        help="Legacy EAR-VAE decode overlap in latent frames.",
+    )
+    parser.add_argument(
+        "--disable-chunked-decode",
+        action="store_true",
+        help=(
+            "Decode legacy EAR-VAE latents in one pass. This can substantially "
+            "increase VRAM use for long or high-channel-count outputs."
+        ),
+    )
+
+
 def _add_sampler_args(parser: argparse.ArgumentParser) -> None:
-    """Register waveform-patch sampler and solver-related CLI arguments."""
+    """Register representation-neutral sampler and solver CLI arguments."""
     parser.add_argument(
         "--sample-rate",
         type=int,
         default=None,
         help=(
             "Target sample rate for input load/resample and output write. Defaults to "
-            "bundle sample_rate when available, otherwise 48000."
+            "the bundle recommendation, then data.training_sample_rate when set, "
+            "otherwise data.sample_rate. Legacy EAR-VAE inference is fixed at 48000."
         ),
     )
     parser.add_argument(
@@ -271,7 +335,7 @@ def _add_sampler_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Inference chunk length in seconds. "
-            "Defaults to data.segment_seconds from the config."
+            "Defaults to the bundle recommendation or training.window_seconds."
         ),
     )
     parser.add_argument(
@@ -279,14 +343,18 @@ def _add_sampler_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help=(
-            "Chunk overlap in seconds for waveform-patch stitching. Defaults to 2.0."
+            "Chunk overlap in seconds for waveform/latent stitching. Defaults to the "
+            "bundle recommendation or training.overlap_seconds."
         ),
     )
     parser.add_argument(
         "--solver",
         default=None,
         choices=SOLVER_CHOICES,
-        help=("Sampler for waveform trajectory integration. " "'auto' selects heun."),
+        help=(
+            "Sampler for flow-trajectory integration. Defaults to the bundle or "
+            "validation-generation recommendation; 'auto' selects heun."
+        ),
     )
     parser.add_argument(
         "--solver-steps",
@@ -296,7 +364,7 @@ def _add_sampler_args(parser: argparse.ArgumentParser) -> None:
             "Step count for fixed-step solvers "
             "(heun/euler/unipc/res6s/midpoint_rk2/rk4/adams). "
             "Ignored by adaptive solvers like dopri5. "
-            "Defaults to 64."
+            "Defaults to the bundle or validation-generation recommendation."
         ),
     )
     parser.add_argument("--solver-rtol", type=float, default=None)
@@ -383,9 +451,19 @@ def _add_runtime_and_reporting_args(parser: argparse.ArgumentParser) -> None:
         "--dynamic-batching",
         action="store_true",
         help=(
-            "Use the experimental dynamic folder batching engine. This batches "
-            "fixed-window model queries across songs and currently supports "
-            "euler/heun/midpoint_rk2/res6s."
+            "Use dynamic folder batching across songs. Supports "
+            "euler/heun/midpoint_rk2/res6s and does not support flow_one_step "
+            "configs."
+        ),
+    )
+    parser.add_argument(
+        "--sampling-order",
+        default="timestep-major",
+        choices=("window-major", "timestep-major"),
+        help=(
+            "Long-sequence sampling order. timestep-major is the training-aligned "
+            "default for sequential and dynamic inference; window-major retains "
+            "the previous compatibility behavior."
         ),
     )
     parser.add_argument(
@@ -416,7 +494,8 @@ def _add_runtime_and_reporting_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Maximum decoded/patched songs active at once for --dynamic-batching. "
-            "Defaults to --max-batch-size."
+            "Defaults to --max-batch-size and is the primary timestep-major VRAM "
+            "control for long songs."
         ),
     )
     parser.add_argument(
@@ -424,8 +503,8 @@ def _add_runtime_and_reporting_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=1,
         help=(
-            "CPU worker count for dynamic folder decode/resample/patch prep. "
-            "Only used with --dynamic-batching."
+            "Worker count for dynamic folder decode/resample/conditioning prep. "
+            "Legacy VAE models require 1. Only used with --dynamic-batching."
         ),
     )
     parser.add_argument(
@@ -433,8 +512,8 @@ def _add_runtime_and_reporting_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=1,
         help=(
-            "CPU worker count for dynamic folder unpatch/normalization/audio writes. "
-            "Only used with --dynamic-batching."
+            "Worker count for dynamic folder decode/unpatch/normalization/audio "
+            "writes. Legacy VAE models require 1. Only used with --dynamic-batching."
         ),
     )
     parser.add_argument(
@@ -465,11 +544,12 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the inference CLI argument parser."""
     parser = argparse.ArgumentParser(
         description=(
-            "Generate spatial multichannel WAV from mono/stereo audio "
-            "using model.target_channels."
+            "Generate spatial audio from mono/stereo input using "
+            "model.target_channels."
         )
     )
     _add_model_and_io_args(parser)
+    _add_vae_args(parser)
     _add_sampler_args(parser)
     _add_runtime_and_reporting_args(parser)
     return parser
@@ -495,28 +575,118 @@ def main() -> None:
     config, bundle_payload = _load_runtime_config_and_bundle_payload(
         resolved_config_path
     )
+    bundled_vae_checkpoint, bundled_vae_config = resolve_bundle_vae_paths(
+        args.checkpoint
+    )
+    resolved_vae_checkpoint = (
+        Path(args.vae_checkpoint_path)
+        if args.vae_checkpoint_path is not None
+        else bundled_vae_checkpoint
+    )
+    resolved_vae_config = (
+        Path(args.vae_config_path)
+        if args.vae_config_path is not None
+        else bundled_vae_config
+    )
+    legacy_vae = is_legacy_vae_model(config)
+    configured_sample_rate = getattr(config.data, "training_sample_rate", None)
+    if configured_sample_rate is None:
+        configured_sample_rate = config.data.sample_rate
     sample_rate = int(
         _resolve_runtime_arg(
             explicit_value=args.sample_rate,
             bundle_payload=bundle_payload,
-            section_name="",
+            section_name="inference",
             key="sample_rate",
-            fallback=48000,
+            fallback=(LEGACY_VAE_SAMPLE_RATE if legacy_vae else configured_sample_rate),
         )
     )
-    chunk_seconds = args.chunk_seconds
-    overlap_seconds = (
-        float(args.overlap_seconds)
-        if args.overlap_seconds is not None
-        else DEFAULT_BUNDLE_OVERLAP_SECONDS
+    if legacy_vae and sample_rate != LEGACY_VAE_SAMPLE_RATE:
+        raise SystemExit(
+            "legacy_vae inference requires --sample-rate 48000 because the "
+            "EAR-VAE codec is fixed at 48 kHz."
+        )
+    chunk_seconds = float(
+        _resolve_runtime_arg(
+            explicit_value=args.chunk_seconds,
+            bundle_payload=bundle_payload,
+            section_name="inference",
+            key="chunk_seconds",
+            fallback=getattr(
+                config.training,
+                "window_seconds",
+                config.data.segment_seconds,
+            ),
+        )
+    )
+    overlap_seconds = float(
+        _resolve_runtime_arg(
+            explicit_value=args.overlap_seconds,
+            bundle_payload=bundle_payload,
+            section_name="inference",
+            key="overlap_seconds",
+            fallback=getattr(
+                config.training,
+                "overlap_seconds",
+                DEFAULT_BUNDLE_OVERLAP_SECONDS,
+            ),
+        )
     )
     solver = cast(
         RequestedSolverName,
-        str(args.solver) if args.solver is not None else "auto",
+        str(
+            _resolve_runtime_arg(
+                explicit_value=args.solver,
+                bundle_payload=bundle_payload,
+                section_name="inference",
+                key="solver",
+                fallback=getattr(
+                    config.training,
+                    "validation_generation_solver",
+                    DEFAULT_BUNDLE_SOLVER,
+                ),
+            )
+        ),
     )
-    solver_steps = args.solver_steps
-    solver_rtol = float(args.solver_rtol) if args.solver_rtol is not None else 1e-5
-    solver_atol = float(args.solver_atol) if args.solver_atol is not None else 1e-5
+    solver_steps = int(
+        _resolve_runtime_arg(
+            explicit_value=args.solver_steps,
+            bundle_payload=bundle_payload,
+            section_name="inference",
+            key="solver_steps",
+            fallback=getattr(
+                config.training,
+                "validation_generation_solver_steps",
+                DEFAULT_BUNDLE_SOLVER_STEPS,
+            ),
+        )
+    )
+    solver_rtol = float(
+        _resolve_runtime_arg(
+            explicit_value=args.solver_rtol,
+            bundle_payload=bundle_payload,
+            section_name="inference",
+            key="solver_rtol",
+            fallback=getattr(
+                config.training,
+                "validation_generation_solver_rtol",
+                DEFAULT_BUNDLE_SOLVER_RTOL,
+            ),
+        )
+    )
+    solver_atol = float(
+        _resolve_runtime_arg(
+            explicit_value=args.solver_atol,
+            bundle_payload=bundle_payload,
+            section_name="inference",
+            key="solver_atol",
+            fallback=getattr(
+                config.training,
+                "validation_generation_solver_atol",
+                DEFAULT_BUNDLE_SOLVER_ATOL,
+            ),
+        )
+    )
     normalize_peak = (
         bool(args.normalize_peak) if args.normalize_peak is not None else False
     )
@@ -545,7 +715,9 @@ def main() -> None:
     ]
     force_overwrite = bool(args.force_overwrite)
     skipped_jobs = [
-        job for job in all_jobs if job.output_audio_path.exists() and not force_overwrite
+        job
+        for job in all_jobs
+        if job.output_audio_path.exists() and not force_overwrite
     ]
     jobs_to_run = [
         job for job in all_jobs if force_overwrite or not job.output_audio_path.exists()
@@ -554,7 +726,9 @@ def main() -> None:
         if folder_mode:
             _safe_print(f"Resume skip: existing_outputs={len(skipped_jobs)}")
         else:
-            _safe_print(f"Resume skip: output exists: {skipped_jobs[0].output_audio_path}")
+            _safe_print(
+                f"Resume skip: output exists: {skipped_jobs[0].output_audio_path}"
+            )
             return
     if folder_mode and not jobs_to_run:
         _safe_print(
@@ -568,6 +742,10 @@ def main() -> None:
     if args.dynamic_batching:
         if not folder_mode:
             raise SystemExit("--dynamic-batching currently requires folder input.")
+        if bool(getattr(config.training, "flow_one_step", False)):
+            raise SystemExit(
+                "--dynamic-batching does not support training.flow_one_step=true."
+            )
         if int(args.max_batch_size) <= 0:
             raise SystemExit("--max-batch-size must be > 0.")
         if args.max_active_requests is not None and int(args.max_active_requests) <= 0:
@@ -576,6 +754,13 @@ def main() -> None:
             raise SystemExit("--preprocess-workers must be > 0.")
         if int(args.postprocess_workers) <= 0:
             raise SystemExit("--postprocess-workers must be > 0.")
+        if is_legacy_vae_model(config) and (
+            int(args.preprocess_workers) != 1 or int(args.postprocess_workers) != 1
+        ):
+            raise SystemExit(
+                "legacy_vae dynamic batching requires --preprocess-workers 1 "
+                "and --postprocess-workers 1 because the VAE is shared."
+            )
     elif args.cuda_graphs:
         raise SystemExit("--cuda-graphs requires --dynamic-batching.")
 
@@ -593,6 +778,8 @@ def main() -> None:
             compile_model=bool(args.compile_model),
             compile_mode=str(args.compile_mode),
             inference_dtype=cast(InferenceDTypeName, args.inference_dtype),
+            vae_checkpoint_path=resolved_vae_checkpoint,
+            vae_config_path=resolved_vae_config,
         )
         if args.compile_model:
             _safe_print(
@@ -620,6 +807,7 @@ def main() -> None:
             f"max_active_requests={max_active_requests} "
             f"preprocess_workers={int(args.preprocess_workers)} "
             f"postprocess_workers={int(args.postprocess_workers)} "
+            f"sampling_order={args.sampling_order} "
             f"cuda_graphs={bool(args.cuda_graphs)}"
             + (
                 f" cuda_graph_buckets={','.join(str(size) for size in cuda_graph_buckets)}"
@@ -638,6 +826,7 @@ def main() -> None:
                 solver_steps=solver_steps,
                 solver_rtol=solver_rtol,
                 solver_atol=solver_atol,
+                sampling_order=args.sampling_order,
                 seed=args.seed,
                 normalize_peak=normalize_peak,
                 mix_style=mix_style,
@@ -647,6 +836,11 @@ def main() -> None:
                 preprocess_workers=int(args.preprocess_workers),
                 postprocess_workers=int(args.postprocess_workers),
                 cuda_graph_runner=cuda_graph_runner,
+                encode_chunk_size_samples=args.encode_chunk_size_samples,
+                encode_overlap_samples=args.encode_overlap_samples,
+                decode_chunk_size_frames=args.decode_chunk_size_frames,
+                decode_overlap_frames=args.decode_overlap_frames,
+                disable_chunked_decode=args.disable_chunked_decode,
             )
         report_path_by_output = {
             str(job.output_audio_path): job.report_json_path for job in jobs_to_run
@@ -661,7 +855,8 @@ def main() -> None:
         avg_batch_size = getattr(scheduler_stats, "average_batch_size", None)
         if avg_batch_size is None:
             avg_batch_size = (
-                float(scheduler_stats.model_queries) / float(scheduler_stats.model_batches)
+                float(scheduler_stats.model_queries)
+                / float(scheduler_stats.model_batches)
                 if int(scheduler_stats.model_batches) > 0
                 else 0.0
             )
@@ -700,6 +895,8 @@ def main() -> None:
         compile_model=bool(args.compile_model),
         compile_mode=str(args.compile_mode),
         inference_dtype=cast(InferenceDTypeName, args.inference_dtype),
+        vae_checkpoint_path=resolved_vae_checkpoint,
+        vae_config_path=resolved_vae_config,
     )
     if args.compile_model:
         _safe_print(
@@ -735,6 +932,12 @@ def main() -> None:
                     normalize_peak=normalize_peak,
                     mix_style=mix_style,
                     mix_style_preset=args.mix_style_preset,
+                    encode_chunk_size_samples=args.encode_chunk_size_samples,
+                    encode_overlap_samples=args.encode_overlap_samples,
+                    decode_chunk_size_frames=args.decode_chunk_size_frames,
+                    decode_overlap_frames=args.decode_overlap_frames,
+                    disable_chunked_decode=args.disable_chunked_decode,
+                    sampling_order=args.sampling_order,
                 )
             except Exception as exc:
                 errors.append((input_audio_path, exc))
@@ -778,6 +981,7 @@ def main() -> None:
         "chunk_frames",
         "overlap_frames",
         "solver",
+        "sampling_order",
         "seed",
         "mix_style_preset",
         "mix_style",

@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 
 from .config import TrainConfig
 from .dataset import WaveformSongDataset
+from .latent_dataset import LatentSongDataset
 from .trainer_settings import TrainerRuntimeSettings
 
 
@@ -17,7 +18,7 @@ def log_training_setup(
     *,
     accelerator: Accelerator,
     config: TrainConfig,
-    dataset: WaveformSongDataset,
+    dataset: WaveformSongDataset | LatentSongDataset,
     dataloader: DataLoader,
     validation_dataloader: DataLoader | None,
     optimizer: torch.optim.Optimizer,
@@ -51,7 +52,7 @@ def log_training_setup(
         "  - sequence_mode="
         f"{getattr(config.training, 'sequence_mode', 'strided_crops')}"
     )
-    print("  - tbptt_windows=" f"{int(getattr(config.training, 'tbptt_windows', 0))}")
+    print(f"  - tbptt_windows={int(getattr(config.training, 'tbptt_windows', 0))}")
     print(
         "  - full_song_max_seconds="
         f"{getattr(config.training, 'full_song_max_seconds', None)}"
@@ -64,8 +65,7 @@ def log_training_setup(
             f"{str(getattr(config.training, 'ema_device', 'accelerator'))}"
         )
         print(
-            "  - ema_cpu_only="
-            f"{bool(getattr(config.training, 'ema_cpu_only', False))}"
+            f"  - ema_cpu_only={bool(getattr(config.training, 'ema_cpu_only', False))}"
         )
     print(f"  - use_gan={settings.use_gan}")
     if settings.use_gan:
@@ -82,7 +82,7 @@ def log_training_setup(
         print(f"  - gan_adv_warmup_steps={settings.gan_adv_warmup_steps}")
         print(f"  - gan_r1_gamma={settings.gan_r1_gamma}")
         print(f"  - gan_r1_every={settings.gan_r1_every}")
-        print("  - discriminator_optimizer_type=" f"{type(discriminator_optimizer)}")
+        print(f"  - discriminator_optimizer_type={type(discriminator_optimizer)}")
 
     print(f"  - routing_kl_weight={settings.routing_kl_weight}")
     print(f"  - routing_kl_temperature={settings.routing_kl_temperature}")
@@ -105,13 +105,9 @@ def log_training_setup(
     print(f"  - binaural_ipd_loss_weight={settings.binaural_ipd_loss_weight}")
     print(f"  - binaural_ccf_loss_weight={settings.binaural_ccf_loss_weight}")
     print(
-        "  - binaural_frame_ild_loss_weight="
-        f"{settings.binaural_frame_ild_loss_weight}"
+        f"  - binaural_frame_ild_loss_weight={settings.binaural_frame_ild_loss_weight}"
     )
-    print(
-        "  - binaural_mid_side_loss_weight="
-        f"{settings.binaural_mid_side_loss_weight}"
-    )
+    print(f"  - binaural_mid_side_loss_weight={settings.binaural_mid_side_loss_weight}")
 
     if isinstance(optimizer, torch.optim.AdamW):
         print(f"  - adamw_fused={bool(optimizer.defaults.get('fused', False))}")
@@ -127,8 +123,7 @@ def log_training_setup(
     print(f"  - stride_seconds={dataset.stride_seconds}")
     print(f"  - stride_frames={dataset.stride_frames}")
     print(
-        "  - shuffle_segments_within_song="
-        f"{config.data.shuffle_segments_within_song}"
+        f"  - shuffle_segments_within_song={config.data.shuffle_segments_within_song}"
     )
     print(
         "  - source_resample_augmentation="
@@ -152,7 +147,9 @@ def log_training_setup(
             "  - amplitude_lift_peak_rescale_min_rms="
             f"{config.data.amplitude_lift_peak_rescale_min_rms}"
         )
-        print(f"  - amplitude_lift_output_lufs={config.data.amplitude_lift_output_lufs}")
+        print(
+            f"  - amplitude_lift_output_lufs={config.data.amplitude_lift_output_lufs}"
+        )
     print(f"  - batch_size_per_process={config.data.batch_size}")
     print(f"  - dataloader_batch_mode={config.data.batch_mode}")
     print(f"  - materialize_cached_signals={config.data.materialize_cached_signals}")

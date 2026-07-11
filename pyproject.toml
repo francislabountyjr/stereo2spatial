@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "stereo2spatial"
 version = "0.1.0"
-description = "Stereo/mono to spatial waveform training and inference stack"
+description = "Stereo/mono to spatial audio training and inference for waveform and EAR-VAE latent models"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -27,6 +27,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+legacy-vae = [
+  "alias-free-torch>=0.0.6",
+  "descript-audio-codec>=1.0.0",
+  "einops>=0.6",
+  "numpy>=1.24",
+  "packaging>=23"
+]
 dev = [
   "mypy>=1.11",
   "pytest>=8.2",
@@ -47,7 +54,7 @@ stereo2spatial = ["py.typed"]
 [tool.ruff]
 target-version = "py310"
 line-length = 88
-extend-exclude = ["scripts", "notebooks"]
+extend-exclude = ["stereo2spatial/vendor", "scripts", "notebooks"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP"]
@@ -64,6 +71,12 @@ no_implicit_optional = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 ignore_missing_imports = true
+exclude = ["stereo2spatial/vendor/"]
+
+[[tool.mypy.overrides]]
+module = ["stereo2spatial.vendor.*"]
+ignore_errors = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

@@ -7,8 +7,6 @@ from typing import Any
 
 import torch
 
-from stereo2spatial.modeling import SpatialDiT
-
 from .config import OptimizerConfig
 
 
@@ -55,7 +53,7 @@ def _is_muon_param(name: str, param: torch.nn.Parameter) -> bool:
 
 
 def build_optimizer_param_groups(
-    model: SpatialDiT,
+    model: torch.nn.Module,
     weight_decay: float,
 ) -> list[dict[str, Any]]:
     """Create decayed and non-decayed parameter groups."""
@@ -77,7 +75,7 @@ def build_optimizer_param_groups(
 
 
 def build_muon_param_groups(
-    model: SpatialDiT,
+    model: torch.nn.Module,
     weight_decay: float,
 ) -> list[dict[str, Any]]:
     """Create Muon and AdamW fallback parameter groups."""
@@ -261,7 +259,7 @@ class Muon(torch.optim.Optimizer):
 
 
 def build_optimizer(
-    model: SpatialDiT,
+    model: torch.nn.Module,
     optimizer_config: OptimizerConfig,
 ) -> torch.optim.Optimizer:
     """Instantiate a configured optimizer for the model."""

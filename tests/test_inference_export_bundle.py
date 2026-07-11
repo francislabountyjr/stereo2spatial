@@ -15,12 +15,15 @@ from stereo2spatial.cli.infer import (
     _load_runtime_config_and_bundle_payload,
     _resolve_output_audio_path,
     _resolve_report_json_path,
+    _resolve_runtime_arg,
     resolve_cli_config_path,
 )
 from stereo2spatial.inference.export_bundle import (
     EXPORT_BUNDLE_CONFIG_FILENAME,
     EXPORT_BUNDLE_WEIGHTS_FILENAME,
+    build_train_config_from_bundle_payload,
     export_model_bundle,
+    load_inference_bundle_payload,
     resolve_inference_config_path,
 )
 from stereo2spatial.training.config import load_config
@@ -184,6 +187,21 @@ def _write_training_run(
     return run_dir, checkpoint_dir
 
 
+def _rewrite_run_as_legacy(run_dir: Path, *, latent_fps: float = 50.0) -> None:
+    config_path = run_dir / "resolved_config.json"
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    model = payload["model"]
+    model["architecture"] = "legacy_vae"
+    model["cond_channels"] = 1
+    model["latent_dim"] = 64
+    model.pop("patch_size", None)
+    payload["data"]["latent_fps"] = latent_fps
+    config_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+
+
 def test_export_model_bundle_prefers_ema_state_when_available(tmp_path: Path) -> None:
     student_model = _TinyModel()
     ema_model = _TinyModel()
@@ -222,6 +240,155 @@ def test_export_model_bundle_prefers_ema_state_when_available(tmp_path: Path) ->
     )
     assert torch.allclose(exported_state["linear.weight"], ema_model.linear.weight)
     assert torch.allclose(exported_state["linear.bias"], ema_model.linear.bias)
+
+
+def test_legacy_export_round_trips_latent_fps(tmp_path: Path) -> None:
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=2,
+        student_state={"linear.weight": torch.zeros((1, 1))},
+    )
+    _rewrite_run_as_legacy(run_dir, latent_fps=37.5)
+    output_dir = tmp_path / "bundle"
+
+    export_model_bundle(
+        train_run_dir=run_dir,
+        checkpoint="latest",
+        output_dir=output_dir,
+        channel_layout_name="stereo",
+        channel_order=["FL", "FR"],
+        include_vae=False,
+    )
+
+    payload = load_inference_bundle_payload(output_dir / EXPORT_BUNDLE_CONFIG_FILENAME)
+    assert payload["latent_fps"] == 37.5
+    config = build_train_config_from_bundle_payload(payload, bundle_root=output_dir)
+    assert config.data.latent_fps == 37.5
+
+
+def test_export_preserves_training_aligned_inference_recommendations(
+    tmp_path: Path,
+) -> None:
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=2,
+        student_state={"linear.weight": torch.zeros((1, 1))},
+    )
+    config_path = run_dir / "resolved_config.json"
+    resolved = json.loads(config_path.read_text(encoding="utf-8"))
+    resolved["data"]["training_sample_rate"] = 24_000
+    resolved["training"].update(
+        {
+            "window_seconds": 7.5,
+            "overlap_seconds": 1.25,
+            "validation_generation_solver": "midpoint_rk2",
+            "validation_generation_solver_steps": 48,
+            "validation_generation_solver_rtol": 2.0e-5,
+            "validation_generation_solver_atol": 3.0e-5,
+        }
+    )
+    config_path.write_text(json.dumps(resolved), encoding="utf-8")
+    output_dir = tmp_path / "bundle"
+
+    export_model_bundle(
+        train_run_dir=run_dir,
+        checkpoint="latest",
+        output_dir=output_dir,
+        channel_layout_name="stereo",
+        channel_order=["FL", "FR"],
+    )
+
+    payload = load_inference_bundle_payload(output_dir / "config.json")
+    assert payload["sample_rate"] == 24_000
+    assert payload["inference"] == {
+        "sample_rate": 24_000,
+        "chunk_seconds": 7.5,
+        "overlap_seconds": 1.25,
+        "solver": "midpoint_rk2",
+        "solver_steps": 48,
+        "solver_rtol": 2.0e-5,
+        "solver_atol": 3.0e-5,
+    }
+    runtime = build_train_config_from_bundle_payload(payload)
+    assert runtime.data.segment_seconds == pytest.approx(7.5)
+    assert runtime.training.window_seconds == pytest.approx(7.5)
+    assert runtime.training.overlap_seconds == pytest.approx(1.25)
+    assert runtime.training.validation_generation_solver == "midpoint_rk2"
+    assert runtime.training.validation_generation_solver_steps == 48
+    assert runtime.training.validation_generation_solver_rtol == pytest.approx(2.0e-5)
+    assert runtime.training.validation_generation_solver_atol == pytest.approx(3.0e-5)
+
+
+def test_export_sample_rate_override_and_legacy_48k_constraint(tmp_path: Path) -> None:
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=2,
+        student_state={"linear.weight": torch.zeros((1, 1))},
+    )
+    waveform_output = tmp_path / "waveform_bundle"
+    export_model_bundle(
+        train_run_dir=run_dir,
+        checkpoint="latest",
+        output_dir=waveform_output,
+        channel_layout_name="stereo",
+        channel_order=["FL", "FR"],
+        sample_rate=32_000,
+    )
+    assert (
+        load_inference_bundle_payload(waveform_output / "config.json")["sample_rate"]
+        == 32_000
+    )
+
+    _rewrite_run_as_legacy(run_dir)
+    with pytest.raises(ValueError, match="require a 48000 Hz sample rate"):
+        export_model_bundle(
+            train_run_dir=run_dir,
+            checkpoint="latest",
+            output_dir=tmp_path / "legacy_bundle",
+            channel_layout_name="stereo",
+            channel_order=["FL", "FR"],
+            sample_rate=44_100,
+            include_vae=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("config_architecture", "state_architecture"),
+    [("waveform", "legacy_vae"), ("legacy_vae", "waveform")],
+)
+def test_export_rejects_checkpoint_architecture_mismatch(
+    tmp_path: Path,
+    config_architecture: str,
+    state_architecture: str,
+) -> None:
+    state = (
+        {
+            "final_proj.weight": torch.zeros((1, 1)),
+            "final_norm.weight": torch.zeros(1),
+        }
+        if state_architecture == "legacy_vae"
+        else {
+            "final_output.conv.weight": torch.zeros((1, 1, 1)),
+            "final_output.adaLN_modulation.1.weight": torch.zeros((1, 1)),
+        }
+    )
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=2,
+        student_state=state,
+    )
+    if config_architecture == "legacy_vae":
+        _rewrite_run_as_legacy(run_dir)
+
+    with pytest.raises(ValueError, match="Checkpoint architecture mismatch"):
+        export_model_bundle(
+            train_run_dir=run_dir,
+            checkpoint="latest",
+            output_dir=tmp_path / "bundle",
+            channel_layout_name="stereo",
+            channel_order=["FL", "FR"],
+            include_vae=False,
+        )
 
 
 def test_cli_bundle_helpers_resolve_config(tmp_path: Path) -> None:
@@ -266,6 +433,43 @@ def test_cli_bundle_helpers_resolve_config(tmp_path: Path) -> None:
     assert config.model.final_output_zero_init is True
     assert config.model.rope_enabled is True
     assert config.model.rope_theta == pytest.approx(20000.0)
+
+
+def test_cli_runtime_arg_prefers_explicit_then_nested_bundle_recommendation() -> None:
+    payload = {
+        "sample_rate": 48_000,
+        "inference": {"sample_rate": 24_000, "chunk_seconds": 7.5},
+    }
+    assert (
+        _resolve_runtime_arg(
+            explicit_value=32_000,
+            bundle_payload=payload,
+            section_name="inference",
+            key="sample_rate",
+            fallback=16_000,
+        )
+        == 32_000
+    )
+    assert (
+        _resolve_runtime_arg(
+            explicit_value=None,
+            bundle_payload=payload,
+            section_name="inference",
+            key="sample_rate",
+            fallback=16_000,
+        )
+        == 24_000
+    )
+    assert (
+        _resolve_runtime_arg(
+            explicit_value=None,
+            bundle_payload={"sample_rate": 48_000},
+            section_name="inference",
+            key="sample_rate",
+            fallback=16_000,
+        )
+        == 48_000
+    )
 
 
 def test_infer_cli_discovers_audio_files_recursively(tmp_path: Path) -> None:
@@ -362,6 +566,7 @@ def test_infer_cli_folder_mode_reuses_session_without_device_arg(
     )
     config_path = run_dir / "resolved_config.json"
     train_config = load_config(config_path)
+    train_config.data.training_sample_rate = 24_000
 
     class _Session:
         run_device = "cuda"
@@ -440,6 +645,11 @@ def test_infer_cli_folder_mode_reuses_session_without_device_arg(
     infer_cli.main()
 
     assert len(calls) == 2
+    assert all(call["sample_rate"] == 24_000 for call in calls)
+    assert all(call["chunk_seconds"] == 10.0 for call in calls)
+    assert all(call["overlap_seconds"] == 2.0 for call in calls)
+    assert all(call["solver"] == "res6s" for call in calls)
+    assert all(call["solver_steps"] == 20 for call in calls)
     assert (report_dir / "a.json").exists()
     assert (report_dir / "b.json").exists()
 
@@ -539,6 +749,15 @@ def test_infer_cli_dynamic_folder_mode_dispatches_jobs(
             "2",
             "--max-active-requests",
             "3",
+            "--encode-chunk-size-samples",
+            "48000",
+            "--encode-overlap-samples",
+            "4800",
+            "--decode-chunk-size-frames",
+            "1024",
+            "--decode-overlap-frames",
+            "128",
+            "--disable-chunked-decode",
         ],
     )
 
@@ -552,6 +771,11 @@ def test_infer_cli_dynamic_folder_mode_dispatches_jobs(
     assert dynamic_kwargs["max_batch_size"] == 2
     assert dynamic_kwargs["max_active_requests"] == 3
     assert dynamic_kwargs["solver"] == "midpoint_rk2"
+    assert dynamic_kwargs["encode_chunk_size_samples"] == 48000
+    assert dynamic_kwargs["encode_overlap_samples"] == 4800
+    assert dynamic_kwargs["decode_chunk_size_frames"] == 1024
+    assert dynamic_kwargs["decode_overlap_frames"] == 128
+    assert dynamic_kwargs["disable_chunked_decode"] is True
     assert (report_dir / "a.json").exists()
     assert (report_dir / "nested" / "b.json").exists()
 

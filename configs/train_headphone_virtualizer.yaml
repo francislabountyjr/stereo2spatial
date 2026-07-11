@@ -65,6 +65,7 @@ data:
         bitrates: [96, 128, 160, 192]
 
 model:
+  architecture: waveform
   target_channels: 2
   cond_channels: 2
   patch_size: 200

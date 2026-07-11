@@ -14,6 +14,7 @@ from stereo2spatial.common.checkpoints import (
     adapt_state_dict_keys_for_model,
     load_safetensors_state_dict_file,
     load_safetensors_state_dict_from_dir,
+    validate_state_dict_architecture,
 )
 
 TRAINER_STATE_FILENAME = "trainer_state.json"
@@ -323,6 +324,7 @@ def _load_model_weights_only(
         if source in {"ema", "auto"}:
             ema_state = _load_ema_state_dict_from_checkpoint_dir(checkpoint_path)
             if ema_state is not None:
+                validate_state_dict_architecture(model, ema_state)
                 ema_state = adapt_state_dict_keys_for_model(model, ema_state)
                 model.load_state_dict(ema_state, strict=True)
                 return "ema"
@@ -334,6 +336,7 @@ def _load_model_weights_only(
 
         state_dict = _load_state_dict_from_checkpoint_dir(checkpoint_path)
         if state_dict is not None:
+            validate_state_dict_architecture(model, state_dict)
             state_dict = adapt_state_dict_keys_for_model(model, state_dict)
             model.load_state_dict(state_dict, strict=True)
             return "student"
@@ -351,6 +354,7 @@ def _load_model_weights_only(
         )
     if checkpoint_path.suffix.lower() == ".safetensors":
         state_dict = load_safetensors_state_dict_file(checkpoint_path)
+        validate_state_dict_architecture(model, state_dict)
         state_dict = adapt_state_dict_keys_for_model(model, state_dict)
         model.load_state_dict(state_dict, strict=True)
         return "student"
@@ -364,6 +368,7 @@ def _load_model_weights_only(
         raise TypeError(
             f"Unsupported checkpoint payload type: {type(payload)} ({checkpoint_path})"
         )
+    validate_state_dict_architecture(model, state_dict)
     state_dict = adapt_state_dict_keys_for_model(model, state_dict)
     model.load_state_dict(state_dict, strict=True)
     return "student"

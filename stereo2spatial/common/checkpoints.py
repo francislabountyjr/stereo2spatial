@@ -6,6 +6,83 @@ from pathlib import Path
 
 import torch
 
+LEGACY_CHECKPOINT_ARCHITECTURE = "legacy_vae"
+WAVEFORM_CHECKPOINT_ARCHITECTURE = "waveform"
+_STATE_PREFIXES = ("module.", "_orig_mod.")
+
+
+def _normalize_checkpoint_key(key: str) -> str:
+    normalized = str(key)
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _STATE_PREFIXES:
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix) :]
+                changed = True
+    return normalized
+
+
+def detect_state_dict_architecture(state_dict: dict[str, torch.Tensor]) -> str:
+    """Classify legacy-VAE vs waveform checkpoints from stable head signatures."""
+    keys = {_normalize_checkpoint_key(key) for key in state_dict}
+    has_legacy = "final_proj.weight" in keys and "final_norm.weight" in keys
+    has_waveform = (
+        "final_output.conv.weight" in keys
+        and "final_output.adaLN_modulation.1.weight" in keys
+    )
+    if has_legacy == has_waveform:
+        raise ValueError(
+            "Unable to determine checkpoint architecture: expected exactly one of "
+            "legacy final_proj/final_norm or waveform final_output signatures."
+        )
+    return (
+        LEGACY_CHECKPOINT_ARCHITECTURE
+        if has_legacy
+        else WAVEFORM_CHECKPOINT_ARCHITECTURE
+    )
+
+
+def try_detect_state_dict_architecture(
+    state_dict: dict[str, torch.Tensor],
+) -> str | None:
+    """Best-effort classifier used for generic test/helper modules."""
+    keys = {_normalize_checkpoint_key(key) for key in state_dict}
+    has_legacy = "final_proj.weight" in keys and "final_norm.weight" in keys
+    has_waveform = (
+        "final_output.conv.weight" in keys
+        and "final_output.adaLN_modulation.1.weight" in keys
+    )
+    if has_legacy and has_waveform:
+        raise ValueError(
+            "Checkpoint contains both legacy and waveform architecture signatures."
+        )
+    if not has_legacy and not has_waveform:
+        return None
+    return (
+        LEGACY_CHECKPOINT_ARCHITECTURE
+        if has_legacy
+        else WAVEFORM_CHECKPOINT_ARCHITECTURE
+    )
+
+
+def validate_state_dict_architecture(
+    model: torch.nn.Module,
+    state_dict: dict[str, torch.Tensor],
+) -> str:
+    """Fail early with a clear error when config and checkpoint families differ."""
+    checkpoint_architecture = try_detect_state_dict_architecture(state_dict)
+    model_architecture = try_detect_state_dict_architecture(dict(model.state_dict()))
+    if checkpoint_architecture is None or model_architecture is None:
+        return checkpoint_architecture or model_architecture or "unknown"
+    if checkpoint_architecture != model_architecture:
+        raise ValueError(
+            "Checkpoint architecture mismatch: "
+            f"checkpoint={checkpoint_architecture} model={model_architecture}. "
+            "Use the matching model.architecture/config (legacy_vae or waveform)."
+        )
+    return checkpoint_architecture
+
 
 def adapt_state_dict_keys_for_model(
     model: torch.nn.Module,
@@ -17,7 +94,7 @@ def adapt_state_dict_keys_for_model(
     if loaded_keys == expected_keys:
         return state_dict
 
-    prefixes = ("module.", "_orig_mod.")
+    prefixes = _STATE_PREFIXES
     adapted = state_dict
     for _ in range(4):
         changed = False

@@ -6,11 +6,16 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import torch
 
+from stereo2spatial.codecs.ear_vae import (
+    decode_channels_independent,
+    encode_channels_independent,
+    vae_encode,
+)
 from stereo2spatial.common.amplitude_lift import (
     amplitude_lift_log_gain,
     apply_amplitude_lift,
@@ -19,6 +24,7 @@ from stereo2spatial.common.amplitude_lift import (
     undo_wavflow_output_lift,
     wavflow_source_transform,
 )
+from stereo2spatial.common.windowing import chunk_weight
 from stereo2spatial.inference.audio import (
     read_audio_channels_first,
     write_audio_channels_first,
@@ -32,6 +38,8 @@ from stereo2spatial.inference.runner import (
     InferenceReport,
     InferenceSession,
     RequestedSolverName,
+    ResolvedSolverName,
+    SamplingOrder,
     _patch_audio,
     _prepare_conditioning_audio,
     _resolve_inference_mix_style,
@@ -51,8 +59,17 @@ from stereo2spatial.inference.windowing import (
     resolve_fixed_window_frames,
     stitch_fixed_windows,
 )
+from stereo2spatial.modeling import is_legacy_vae_model
 
 _DYNAMIC_SOLVERS = {"euler", "heun", "midpoint_rk2", "res6s"}
+
+
+def _normalize_sampling_order(value: str) -> SamplingOrder:
+    """Normalize public underscore/hyphen spellings for dynamic inference."""
+    normalized = str(value).strip().lower().replace("-", "_")
+    if normalized not in {"window_major", "timestep_major"}:
+        raise ValueError("sampling_order must be 'window_major' or 'timestep_major'")
+    return cast(SamplingOrder, normalized)
 
 
 @dataclass
@@ -74,7 +91,7 @@ class WindowedInferenceRequest:
     target_channels: int
     window_frames: int
     overlap_frames: int
-    solver: str
+    solver: ResolvedSolverName
     solver_steps: int
     seed: int
     mem: torch.Tensor | None = None
@@ -84,7 +101,7 @@ class WindowedInferenceRequest:
     _active_controller: FixedStepSolverController | None = None
     _pred_windows: list[torch.Tensor] = field(default_factory=list)
     _specs: list[FixedWindowSpec] = field(init=False)
-    _generator: torch.Generator = field(init=False)
+    _z0_full: torch.Tensor | None = field(init=False)
 
     def __post_init__(self) -> None:
         if self.cond_signal.dim() != 3:
@@ -102,13 +119,29 @@ class WindowedInferenceRequest:
             window_frames=int(self.window_frames),
             overlap_frames=int(self.overlap_frames),
         )
-        self._generator = torch.Generator(device=self.cond_signal.device)
-        self._generator.manual_seed(int(self.seed))
+        generator = torch.Generator(device=self.cond_signal.device)
+        generator.manual_seed(int(self.seed))
+        # Draw one full-song noise tensor so overlapping windows share the exact
+        # same realization. Masked right-padding is added as zeros later, matching
+        # the full-song training window slicer.
+        self._z0_full = torch.randn(
+            (
+                1,
+                int(self.target_channels),
+                int(self.cond_signal.shape[1]),
+                int(self.cond_signal.shape[-1]),
+            ),
+            generator=generator,
+            dtype=self.cond_signal.dtype,
+            device=self.cond_signal.device,
+        )
 
     @property
     def is_done(self) -> bool:
         """Whether all windows have been solved and stitched."""
-        return self._window_index >= len(self._specs) and self._active_controller is None
+        return (
+            self._window_index >= len(self._specs) and self._active_controller is None
+        )
 
     @property
     def active_controller(self) -> FixedStepSolverController | None:
@@ -133,22 +166,34 @@ class WindowedInferenceRequest:
                 device=self.cond_signal.device,
             )
             valid_mask[:, : spec.valid_frames] = True
-        z0_window = torch.randn(
-            (
-                1,
-                int(self.target_channels),
-                int(self.cond_signal.shape[1]),
-                int(self.window_frames),
-            ),
-            generator=self._generator,
-            dtype=self.cond_signal.dtype,
-            device=self.cond_signal.device,
-        )
+        if self._z0_full is None:
+            raise RuntimeError(
+                "full-song noise was released before inference completed"
+            )
+        z0_window = self._z0_full[..., spec.start_frame : spec.end_frame]
+        if spec.padded_frames > 0:
+            pad_z0 = torch.zeros(
+                (
+                    1,
+                    int(self.target_channels),
+                    int(self.cond_signal.shape[1]),
+                    int(spec.padded_frames),
+                ),
+                dtype=self.cond_signal.dtype,
+                device=self.cond_signal.device,
+            )
+            z0_window = torch.cat(
+                [z0_window, pad_z0],
+                dim=-1,
+            )
+        z0_window = z0_window.contiguous()
         conditioning_cache = None
         if model is not None:
             cache_builder = getattr(model, "build_conditioning_cache", None)
             if cache_builder is None and hasattr(model, "_orig_mod"):
-                cache_builder = getattr(model._orig_mod, "build_conditioning_cache", None)
+                cache_builder = getattr(
+                    model._orig_mod, "build_conditioning_cache", None
+                )
             if cache_builder is not None:
                 conditioning_cache = cache_builder(
                     z_cond=cond_window,
@@ -175,7 +220,9 @@ class WindowedInferenceRequest:
             raise RuntimeError("no active controller to accept")
         if not self._active_controller.is_done:
             raise RuntimeError("active controller is not done")
-        self._pred_windows.append(self._active_controller.result()[0].detach().cpu())
+        self._pred_windows.append(
+            self._active_controller.result()[0].detach().cpu().float()
+        )
         self.mem = (
             None
             if self._active_controller.mem_out is None
@@ -183,6 +230,8 @@ class WindowedInferenceRequest:
         )
         self._active_controller = None
         self._window_index += 1
+        if self._window_index >= len(self._specs):
+            self._z0_full = None
 
     def result(self) -> WindowedInferenceResult:
         """Return the stitched request result."""
@@ -199,6 +248,194 @@ class WindowedInferenceRequest:
             window_count=len(self._specs),
             final_memory=self.mem,
         )
+
+
+class _TimestepMajorRequestController:
+    """Advance one song-level solver through left-to-right memory sweeps."""
+
+    def __init__(self, request: WindowedInferenceRequest) -> None:
+        if request._active_controller is not None or request._window_index != 0:
+            raise ValueError(
+                "timestep-major inference requires a fresh windowed request"
+            )
+        if request._z0_full is None:
+            raise ValueError("timestep-major inference request has no song noise")
+
+        self.request_id = request.request_id
+        self._specs = request._specs
+        self._cond_signal = request.cond_signal
+        self._target_channels = int(request.target_channels)
+        self._window_frames = int(request.window_frames)
+        self._overlap_frames = int(request.overlap_frames)
+        self._initial_mem = (
+            None if request.mem is None else request.mem.detach().clone()
+        )
+        self._mix_style = request.mix_style
+        self._amplitude_gain = request.amplitude_gain
+        self._global_controller = FixedStepSolverController(
+            request_id=request.request_id,
+            window_index=-1,
+            solver=request.solver,
+            solver_steps=request.solver_steps,
+            z0_chunk=request._z0_full,
+            z_cond=request.cond_signal.unsqueeze(0),
+            valid_mask=None,
+        )
+        # The global solver now owns the song-level state. Drop the request's
+        # reference so completed/prepared requests do not retain another handle.
+        request._z0_full = None
+
+        device = request.cond_signal.device
+        total_frames = int(request.cond_signal.shape[-1])
+        self._window_weights = [
+            chunk_weight(
+                chunk_length=spec.valid_frames,
+                overlap_frames=self._overlap_frames,
+                is_first=(index == 0),
+                is_last=(index == len(self._specs) - 1),
+                device=device,
+                dtype=torch.float32,
+            )
+            for index, spec in enumerate(self._specs)
+        ]
+        self._weight_sum = torch.zeros(
+            (total_frames,),
+            device=device,
+            dtype=torch.float32,
+        )
+        for spec, weight in zip(self._specs, self._window_weights):
+            self._weight_sum[spec.start_frame : spec.end_frame] += weight
+
+        self._global_query: ModelQuery | None = None
+        self._sweep_window_index = 0
+        self._sweep_mem: torch.Tensor | None = None
+        self._assembled: torch.Tensor | None = None
+        self._last_query: ModelQuery | None = None
+        self._query_index = 0
+        self._result: WindowedInferenceResult | None = None
+
+    @property
+    def is_done(self) -> bool:
+        """Whether the song-level solver and final clean sweep are complete."""
+        return self._result is not None
+
+    def result(self) -> WindowedInferenceResult:
+        """Return the completed song-level prediction."""
+        if self._result is None:
+            raise RuntimeError("timestep-major request is not done")
+        return self._result
+
+    def next_query(self) -> ModelQuery | None:
+        """Return the next strictly left-to-right window query for this song."""
+        if self.is_done:
+            return None
+        if self._last_query is not None:
+            raise RuntimeError("next_query called before accepting the prior output")
+
+        if self._global_query is None:
+            global_query = self._global_controller.next_query()
+            if global_query is None:
+                raise RuntimeError("global solver ended without a final result")
+            self._global_query = global_query
+            self._sweep_window_index = 0
+            self._sweep_mem = (
+                None
+                if self._initial_mem is None
+                else self._initial_mem.detach().clone()
+            )
+            self._assembled = torch.zeros(
+                (
+                    1,
+                    self._target_channels,
+                    int(self._cond_signal.shape[1]),
+                    int(self._cond_signal.shape[-1]),
+                ),
+                device=self._cond_signal.device,
+                dtype=torch.float32,
+            )
+
+        spec = self._specs[self._sweep_window_index]
+        z_window = extract_fixed_window(
+            self._global_query.zt,
+            spec,
+            pad_value=0.0,
+        )
+        cond_window = extract_fixed_window(
+            self._cond_signal,
+            spec,
+            pad_value=0.0,
+        ).unsqueeze(0)
+        valid_mask = torch.zeros(
+            (1, self._window_frames),
+            device=self._cond_signal.device,
+            dtype=torch.bool,
+        )
+        valid_mask[:, : spec.valid_frames] = True
+        query = ModelQuery(
+            request_id=self.request_id,
+            window_index=spec.index,
+            query_index=self._query_index,
+            zt=z_window,
+            z_cond=cond_window,
+            valid_mask=valid_mask,
+            t_value=self._global_query.t_value,
+            mem=self._sweep_mem,
+            mix_style=self._mix_style,
+            amplitude_gain=self._amplitude_gain,
+            return_mem=self._sweep_mem is not None,
+        )
+        self._query_index += 1
+        self._last_query = query
+        return query
+
+    def accept_output(
+        self,
+        clean_prediction: torch.Tensor,
+        mem_out: torch.Tensor | None = None,
+    ) -> None:
+        """Accumulate one window and advance the global solver after the sweep."""
+        if self._last_query is None or self._global_query is None:
+            raise RuntimeError("accept_output called before next_query")
+        if self._assembled is None:
+            raise RuntimeError("timestep-major sweep has no accumulation buffer")
+
+        spec = self._specs[self._sweep_window_index]
+        clean_valid = clean_prediction[..., : spec.valid_frames].float()
+        weight = self._window_weights[self._sweep_window_index]
+        self._assembled[..., spec.start_frame : spec.end_frame] += (
+            clean_valid * weight[None, None, None, :]
+        )
+        if self._sweep_mem is not None:
+            if mem_out is None:
+                raise RuntimeError(
+                    "timestep-major memory query returned no updated memory"
+                )
+            self._sweep_mem = mem_out.detach()
+        self._last_query = None
+        self._sweep_window_index += 1
+
+        if self._sweep_window_index < len(self._specs):
+            return
+
+        clean_global = (
+            self._assembled / self._weight_sum.clamp_min(1.0e-8)[None, None, None, :]
+        )
+        clean_global = clean_global.to(dtype=self._global_query.zt.dtype)
+        self._global_controller.accept_output(clean_global)
+        self._global_query = None
+        self._sweep_mem = None
+        self._assembled = None
+
+        if self._global_controller.is_done:
+            pred_signal = (
+                self._global_controller.result()[0].detach().cpu().float().contiguous()
+            )
+            self._result = WindowedInferenceResult(
+                request_id=self.request_id,
+                pred_signal=pred_signal,
+                window_count=len(self._specs),
+                final_memory=None,
+            )
 
 
 @dataclass(frozen=True)
@@ -230,6 +467,7 @@ class _PreparedFileRequest:
     solver_steps: int
     solver_rtol: float
     solver_atol: float
+    sampling_order: SamplingOrder
     seed: int
     mix_style: list[float] | None
     mix_style_preset: str | None
@@ -243,6 +481,9 @@ class _PreparedFileRequest:
     amplitude_lift_gain: torch.Tensor | None
     lift_power: float
     lift_min: float | None
+    decode_chunk_size_frames: int
+    decode_overlap_frames: int
+    disable_chunked_decode: bool
 
 
 @dataclass(frozen=True)
@@ -293,13 +534,19 @@ def _prepare_dynamic_file_request(
     sample_rate: int,
     window_seconds: float,
     overlap_seconds: float,
-    solver: str,
+    solver: ResolvedSolverName,
     solver_steps: int,
     solver_rtol: float,
     solver_atol: float,
+    sampling_order: SamplingOrder,
     seed: int,
     mix_style: list[float] | dict[str, float] | None,
     mix_style_preset: str | None,
+    encode_chunk_size_samples: int | None,
+    encode_overlap_samples: int | None,
+    decode_chunk_size_frames: int,
+    decode_overlap_frames: int,
+    disable_chunked_decode: bool,
 ) -> _PreparedFileRequest:
     config = session.config
     run_dtype = session.run_dtype
@@ -313,9 +560,14 @@ def _prepare_dynamic_file_request(
             f"Input must be mono or stereo. Got channels={audio.shape[0]} for {input_path}"
         )
 
-    conditioning_audio = _prepare_conditioning_audio(
-        audio.float(),
-        cond_channels=int(config.model.cond_channels),
+    legacy_vae = is_legacy_vae_model(config)
+    conditioning_audio = (
+        audio.float()
+        if legacy_vae
+        else _prepare_conditioning_audio(
+            audio.float(),
+            cond_channels=int(config.model.cond_channels),
+        )
     )
     amplitude_lift_gain = None
     amplitude_lift_log_gain_tensor: torch.Tensor | None = None
@@ -328,6 +580,11 @@ def _prepare_dynamic_file_request(
     lift_min = getattr(config.data, "amplitude_lift_gain_min_value", None)
     lift_output_lufs = float(getattr(config.data, "amplitude_lift_output_lufs", -23.0))
     if bool(getattr(config.data, "amplitude_lift_enabled", False)):
+        if legacy_vae:
+            raise ValueError(
+                "Amplitude lifting is waveform-only and cannot be used with "
+                "legacy_vae latent inference."
+            )
         lift_reference = (
             str(getattr(config.data, "amplitude_lift_reference", "source"))
             .strip()
@@ -383,17 +640,76 @@ def _prepare_dynamic_file_request(
                 eps=float(getattr(config.data, "amplitude_lift_eps", 1.0e-8)),
             ).to(session.run_device, dtype=run_dtype)
 
-    cond_signal, input_sample_count = _patch_audio(
-        conditioning_audio,
-        patch_size=int(config.model.patch_size),
-    )
+    input_sample_count = int(conditioning_audio.shape[-1])
+    if legacy_vae:
+        if session.vae is None:
+            raise RuntimeError("legacy_vae inference session is missing its VAE")
+        if int(config.model.cond_channels) == 1:
+            encoded = vae_encode(
+                vae=session.vae,
+                audio=conditioning_audio,
+                sample_rate=actual_sample_rate,
+                use_sample=False,
+                use_chunked_encode=True,
+                chunk_size_samples=encode_chunk_size_samples,
+                overlap_samples=encode_overlap_samples,
+                duplicate_mono_to_stereo=True,
+                offload_latent_to_cpu=False,
+                show_progress=False,
+                device=session.run_device,
+            )
+            if encoded.dim() != 2:
+                raise ValueError(
+                    "Expected EAR-VAE conditioning latent [D,T], "
+                    f"got {tuple(encoded.shape)}"
+                )
+            cond_signal = encoded.unsqueeze(0).contiguous()
+        else:
+            cond_signal = encode_channels_independent(
+                vae=session.vae,
+                audio=_prepare_conditioning_audio(
+                    conditioning_audio,
+                    cond_channels=int(config.model.cond_channels),
+                ),
+                sample_rate=actual_sample_rate,
+                use_sample=False,
+                use_chunked_encode=True,
+                chunk_size_samples=encode_chunk_size_samples,
+                overlap_samples=encode_overlap_samples,
+                offload_latent_to_cpu=False,
+                show_progress=False,
+                device=session.run_device,
+            )
+        expected_latent_dim = int(
+            getattr(config.model, "latent_dim", None) or config.model.patch_size
+        )
+        if int(cond_signal.shape[1]) != expected_latent_dim:
+            raise ValueError(
+                "EAR-VAE latent width does not match model.latent_dim: "
+                f"{int(cond_signal.shape[1])} != {expected_latent_dim}"
+            )
+        latent_fps = getattr(config.data, "latent_fps", 50.0)
+        patch_fps = (
+            50.0 if str(latent_fps).strip().lower() == "auto" else float(latent_fps)
+        )
+        window_frames = max(1, int(round(window_seconds * patch_fps)))
+        overlap_frames = min(
+            int(round(overlap_seconds * patch_fps)),
+            max(0, window_frames - 1),
+        )
+    else:
+        cond_signal, input_sample_count = _patch_audio(
+            conditioning_audio,
+            patch_size=int(config.model.patch_size),
+        )
+        patch_fps = float(actual_sample_rate) / float(config.model.patch_size)
+        window_frames, overlap_frames = resolve_fixed_window_frames(
+            sample_rate=actual_sample_rate,
+            patch_size=int(config.model.patch_size),
+            window_seconds=window_seconds,
+            overlap_seconds=overlap_seconds,
+        )
     cond_signal = cond_signal.to(session.run_device, dtype=run_dtype)
-    window_frames, overlap_frames = resolve_fixed_window_frames(
-        sample_rate=actual_sample_rate,
-        patch_size=int(config.model.patch_size),
-        window_seconds=window_seconds,
-        overlap_seconds=overlap_seconds,
-    )
     mix_style_tensor = _resolve_inference_mix_style(
         raw_mix_style=mix_style,
         mix_style_dim=int(getattr(config.model, "mix_style_dim", 0)),
@@ -430,7 +746,7 @@ def _prepare_dynamic_file_request(
         input_samples=int(audio.shape[-1]),
         conditioning_signal_shape=[int(x) for x in cond_signal.shape],
         input_sample_count=input_sample_count,
-        patch_fps=float(actual_sample_rate) / float(config.model.patch_size),
+        patch_fps=patch_fps,
         window_seconds=window_seconds,
         window_frames=window_frames,
         overlap_seconds=overlap_seconds,
@@ -439,6 +755,7 @@ def _prepare_dynamic_file_request(
         solver_steps=solver_steps,
         solver_rtol=solver_rtol,
         solver_atol=solver_atol,
+        sampling_order=sampling_order,
         seed=seed,
         mix_style=(
             [float(x) for x in mix_style_tensor.detach().cpu().flatten().tolist()]
@@ -462,6 +779,9 @@ def _prepare_dynamic_file_request(
         amplitude_lift_gain=amplitude_lift_gain,
         lift_power=lift_power,
         lift_min=lift_min,
+        decode_chunk_size_frames=decode_chunk_size_frames,
+        decode_overlap_frames=decode_overlap_frames,
+        disable_chunked_decode=disable_chunked_decode,
     )
 
 
@@ -476,10 +796,32 @@ def _finalize_dynamic_file_result(
     output_path = prepared.output_audio_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    decoded = _unpatch_audio(
-        result.pred_signal.cpu().float(),
-        sample_count=prepared.input_sample_count,
-    )
+    legacy_vae = is_legacy_vae_model(config)
+    if legacy_vae:
+        if session.vae is None:
+            raise RuntimeError("legacy_vae inference session is missing its VAE")
+        decoded = (
+            decode_channels_independent(
+                vae=session.vae,
+                channel_latents=result.pred_signal.to(
+                    session.run_device, dtype=torch.float32
+                ),
+                use_chunked_decode=not prepared.disable_chunked_decode,
+                chunk_size_frames=prepared.decode_chunk_size_frames,
+                overlap_frames=prepared.decode_overlap_frames,
+                offload_wav_to_cpu=True,
+                reduction="mean",
+                show_progress=False,
+                device=session.run_device,
+            )
+            .float()
+            .cpu()
+        )[:, : prepared.input_sample_count]
+    else:
+        decoded = _unpatch_audio(
+            result.pred_signal.cpu().float(),
+            sample_count=prepared.input_sample_count,
+        )
     if prepared.amplitude_lift_gain is not None:
         if prepared.amplitude_lift_mode == "wavflow":
             decoded = undo_wavflow_output_lift(
@@ -536,10 +878,11 @@ def _finalize_dynamic_file_result(
         "chunk_frames": int(prepared.window_frames),
         "overlap_seconds": float(prepared.overlap_seconds),
         "overlap_frames": int(prepared.overlap_frames),
-        "solver": prepared.solver,  # type: ignore[typeddict-item]
+        "solver": prepared.solver,
         "solver_steps": int(prepared.solver_steps),
         "solver_rtol": float(prepared.solver_rtol),
         "solver_atol": float(prepared.solver_atol),
+        "sampling_order": prepared.sampling_order,
         "seed": int(prepared.seed),
         "mix_style": prepared.mix_style,
         "mix_style_preset": prepared.mix_style_preset,
@@ -559,6 +902,8 @@ def _finalize_dynamic_file_result(
         "compiled": bool(session.compiled),
         "compile_mode": session.compile_mode,
         "inference_dtype": str(session.run_dtype).replace("torch.", ""),
+        "architecture": str(getattr(session.config.model, "architecture", "waveform")),
+        "representation": "latent" if legacy_vae else "waveform",
     }
 
 
@@ -571,8 +916,19 @@ def run_windowed_inference_requests(
     max_active_requests: int | None = None,
     cuda_graph_runner: CudaGraphModelRunner | None = None,
     on_result: Callable[[WindowedInferenceResult], None] | None = None,
+    sampling_order: SamplingOrder = "timestep_major",
 ) -> OfflineBatchResult:
     """Run windowed requests to completion with dynamic model-query batching."""
+    resolved_sampling_order = _normalize_sampling_order(sampling_order)
+    if resolved_sampling_order == "timestep_major":
+        return _run_timestep_major_inference_requests(
+            requests=requests,
+            model=model,
+            max_batch_size=max_batch_size,
+            max_active_requests=max_active_requests,
+            cuda_graph_runner=cuda_graph_runner,
+            on_result=on_result,
+        )
     if max_batch_size <= 0:
         raise ValueError("max_batch_size must be > 0")
     if max_active_requests is not None and max_active_requests <= 0:
@@ -602,13 +958,17 @@ def run_windowed_inference_requests(
         max_observed_active = max(max_observed_active, len(active))
 
     def execute_batches(
-        query_items: list[tuple[WindowedInferenceRequest, SolverController, ModelQuery]],
+        query_items: list[
+            tuple[WindowedInferenceRequest, SolverController, ModelQuery]
+        ],
     ) -> tuple[int, int, int, dict[int, int]]:
         local_batches = 0
         local_queries = 0
         local_max_batch = 0
         local_counts: dict[int, int] = {}
-        query_to_controller = {id(query): controller for _, controller, query in query_items}
+        query_to_controller = {
+            id(query): controller for _, controller, query in query_items
+        }
         for batch_queries in group_compatible_queries(
             [query for _, _, query in query_items],
             max_batch_size=max_batch_size,
@@ -640,7 +1000,9 @@ def run_windowed_inference_requests(
             mem_batch = None
             if batch_queries[0].return_mem:
                 if not isinstance(output, tuple) or len(output) != 2:
-                    raise TypeError("return_mem model query must return (prediction, mem)")
+                    raise TypeError(
+                        "return_mem model query must return (prediction, mem)"
+                    )
                 prediction_batch, mem_batch = output
             else:
                 prediction_batch = output
@@ -666,14 +1028,18 @@ def run_windowed_inference_requests(
 
     fill_active()
     while active:
-        query_items: list[tuple[WindowedInferenceRequest, SolverController, ModelQuery]] = []
+        query_items: list[
+            tuple[WindowedInferenceRequest, SolverController, ModelQuery]
+        ] = []
         for request in active:
             controller = request.ensure_active_controller(model=model)
             if controller is None:
                 continue
             query = controller.next_query()
             if query is None:
-                raise RuntimeError("active controller returned no query before completion")
+                raise RuntimeError(
+                    "active controller returned no query before completion"
+                )
             query_items.append((request, controller, query))
         if not query_items:
             raise RuntimeError("offline batch scheduler made no progress")
@@ -718,6 +1084,165 @@ def run_windowed_inference_requests(
     )
 
 
+def _run_timestep_major_inference_requests(
+    *,
+    requests: Iterable[WindowedInferenceRequest],
+    model: torch.nn.Module,
+    max_batch_size: int,
+    max_active_requests: int | None,
+    cuda_graph_runner: CudaGraphModelRunner | None,
+    on_result: Callable[[WindowedInferenceResult], None] | None,
+) -> OfflineBatchResult:
+    """Dynamically batch training-aligned song-level solver controllers."""
+    if max_batch_size <= 0:
+        raise ValueError("max_batch_size must be > 0")
+    if max_active_requests is not None and max_active_requests <= 0:
+        raise ValueError("max_active_requests must be > 0 when set")
+
+    pending = iter(requests)
+    pending_exhausted = False
+    active: list[_TimestepMajorRequestController] = []
+    results: list[WindowedInferenceResult] = []
+    model_batches = 0
+    model_queries = 0
+    max_observed_batch_size = 0
+    max_observed_active = 0
+    batch_size_counts: dict[int, int] = {}
+
+    def fill_active() -> None:
+        nonlocal max_observed_active, pending_exhausted
+        limit = max_active_requests if max_active_requests is not None else None
+        while not pending_exhausted and (limit is None or len(active) < limit):
+            try:
+                request = next(pending)
+            except StopIteration:
+                pending_exhausted = True
+                break
+            active.append(_TimestepMajorRequestController(request))
+        max_observed_active = max(max_observed_active, len(active))
+
+    def execute_batches(
+        query_items: list[tuple[_TimestepMajorRequestController, ModelQuery]],
+    ) -> tuple[int, int, int, dict[int, int]]:
+        local_batches = 0
+        local_queries = 0
+        local_max_batch = 0
+        local_counts: dict[int, int] = {}
+        query_to_controller = {
+            id(query): controller for controller, query in query_items
+        }
+        for batch_queries in group_compatible_queries(
+            [query for _, query in query_items],
+            max_batch_size=max_batch_size,
+        ):
+            batch_size = len(batch_queries)
+            batch = stack_model_queries(batch_queries)
+            # The reference timestep-major sampler deliberately supplies float32
+            # time values even when the evolving audio/latent state is lower
+            # precision. Preserve that contract in dynamic batches as well.
+            batch["t"] = torch.tensor(
+                [float(query.t_value) for query in batch_queries],
+                dtype=torch.float32,
+                device=batch_queries[0].zt.device,
+            )
+            kwargs: dict[str, Any] = {
+                "zt": batch["zt"],
+                "t": batch["t"],
+                "z_cond": batch["z_cond"],
+                "valid_mask": batch.get("valid_mask"),
+            }
+            if "mem" in batch:
+                kwargs["mem"] = batch["mem"]
+            if "mix_style" in batch:
+                kwargs["mix_style"] = batch["mix_style"]
+            if "amplitude_gain" in batch:
+                kwargs["amplitude_gain"] = batch["amplitude_gain"]
+            if "conditioning_cache" in batch:
+                kwargs["conditioning_cache"] = batch["conditioning_cache"]
+            if batch_queries[0].return_mem:
+                kwargs["return_mem"] = True
+
+            output = (
+                cuda_graph_runner.run(kwargs, actual_batch_size=batch_size)
+                if cuda_graph_runner is not None
+                else model(**kwargs)
+            )
+            mem_batch = None
+            if batch_queries[0].return_mem:
+                if not isinstance(output, tuple) or len(output) != 2:
+                    raise TypeError(
+                        "return_mem model query must return (prediction, mem)"
+                    )
+                prediction_batch, mem_batch = output
+            else:
+                prediction_batch = output
+            if not isinstance(prediction_batch, torch.Tensor):
+                raise TypeError("model must return a tensor prediction")
+
+            local_batches += 1
+            local_queries += batch_size
+            local_max_batch = max(local_max_batch, batch_size)
+            local_counts[batch_size] = local_counts.get(batch_size, 0) + 1
+            for item_idx, query in enumerate(batch_queries):
+                controller = query_to_controller[id(query)]
+                mem_out = (
+                    None
+                    if mem_batch is None
+                    else mem_batch[item_idx : item_idx + 1].contiguous()
+                )
+                controller.accept_output(
+                    prediction_batch[item_idx : item_idx + 1].contiguous(),
+                    mem_out=mem_out,
+                )
+        return local_batches, local_queries, local_max_batch, local_counts
+
+    fill_active()
+    while active:
+        query_items: list[tuple[_TimestepMajorRequestController, ModelQuery]] = []
+        for controller in active:
+            query = controller.next_query()
+            if query is None:
+                raise RuntimeError("active timestep-major controller returned no query")
+            query_items.append((controller, query))
+        if not query_items:
+            raise RuntimeError("timestep-major batch scheduler made no progress")
+
+        batches, queries, batch_peak, counts = execute_batches(query_items)
+        model_batches += batches
+        model_queries += queries
+        max_observed_batch_size = max(max_observed_batch_size, batch_peak)
+        for batch_size, count in counts.items():
+            batch_size_counts[batch_size] = batch_size_counts.get(batch_size, 0) + count
+
+        still_active: list[_TimestepMajorRequestController] = []
+        for controller in active:
+            if controller.is_done:
+                result = controller.result()
+                results.append(result)
+                if on_result is not None:
+                    on_result(result)
+            else:
+                still_active.append(controller)
+        active = still_active
+        fill_active()
+
+    scheduler_stats = SchedulerStats(
+        completed_controllers=sum(result.window_count for result in results),
+        model_batches=model_batches,
+        model_queries=model_queries,
+        max_observed_batch_size=max_observed_batch_size,
+        max_observed_active_controllers=max_observed_active,
+        batch_size_counts=batch_size_counts,
+    )
+    return OfflineBatchResult(
+        results=results,
+        stats=OfflineBatchStats(
+            scheduler=scheduler_stats,
+            completed_requests=len(results),
+        ),
+    )
+
+
 @torch.inference_mode()
 def run_dynamic_folder_inference(
     *,
@@ -739,10 +1264,30 @@ def run_dynamic_folder_inference(
     preprocess_workers: int = 1,
     postprocess_workers: int = 1,
     cuda_graph_runner: CudaGraphModelRunner | None = None,
+    encode_chunk_size_samples: int | None = None,
+    encode_overlap_samples: int | None = None,
+    decode_chunk_size_frames: int = 2048,
+    decode_overlap_frames: int = 256,
+    disable_chunked_decode: bool = False,
+    sampling_order: SamplingOrder = "timestep_major",
 ) -> DynamicFolderInferenceResult:
     """Run dynamic-batched inference for a collection of filesystem jobs."""
+    resolved_sampling_order = _normalize_sampling_order(sampling_order)
+    if is_legacy_vae_model(session.config) and int(sample_rate) != 48_000:
+        raise ValueError(
+            "legacy_vae inference requires sample_rate=48000 for the EAR-VAE codec"
+        )
+    if is_legacy_vae_model(session.config) and (
+        int(preprocess_workers) != 1 or int(postprocess_workers) != 1
+    ):
+        raise ValueError(
+            "legacy_vae dynamic batching requires preprocess_workers=1 and "
+            "postprocess_workers=1 because one VAE instance is shared"
+        )
     if bool(getattr(session.config.training, "flow_one_step", False)):
-        raise ValueError("dynamic batching does not support flow_one_step inference yet")
+        raise ValueError(
+            "dynamic batching does not support flow_one_step inference yet"
+        )
 
     resolved_solver = _resolve_inference_solver(requested_solver=solver)
     if resolved_solver not in _DYNAMIC_SOLVERS:
@@ -754,8 +1299,18 @@ def run_dynamic_folder_inference(
     window_seconds = (
         float(chunk_seconds)
         if chunk_seconds is not None
-        else float(session.config.data.segment_seconds)
+        else float(
+            getattr(
+                session.config.training,
+                "window_seconds",
+                session.config.data.segment_seconds,
+            )
+        )
     )
+    if window_seconds <= 0:
+        raise ValueError("chunk_seconds must be > 0")
+    if overlap_seconds < 0:
+        raise ValueError("overlap_seconds must be >= 0")
     if preprocess_workers <= 0:
         raise ValueError("preprocess_workers must be > 0")
     if postprocess_workers <= 0:
@@ -778,9 +1333,15 @@ def run_dynamic_folder_inference(
                 solver_steps=resolved_solver_steps,
                 solver_rtol=solver_rtol,
                 solver_atol=solver_atol,
+                sampling_order=resolved_sampling_order,
                 seed=seed,
                 mix_style=mix_style,
                 mix_style_preset=mix_style_preset,
+                encode_chunk_size_samples=encode_chunk_size_samples,
+                encode_overlap_samples=encode_overlap_samples,
+                decode_chunk_size_frames=decode_chunk_size_frames,
+                decode_overlap_frames=decode_overlap_frames,
+                disable_chunked_decode=disable_chunked_decode,
             )
 
         if preprocess_workers == 1:
@@ -867,6 +1428,7 @@ def run_dynamic_folder_inference(
             max_active_requests=max_active_requests,
             cuda_graph_runner=cuda_graph_runner,
             on_result=handle_completed_result,
+            sampling_order=resolved_sampling_order,
         )
     finally:
         if postprocess_executor is not None:

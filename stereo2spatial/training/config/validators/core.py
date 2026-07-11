@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from stereo2spatial.modeling.factory import (
+    LEGACY_VAE_ARCHITECTURE,
+    resolve_model_architecture,
+)
+
 from ..types import TrainConfig
 from .common import require_non_negative, require_positive, require_probability
 
@@ -35,6 +40,34 @@ def validate_data_section(config: TrainConfig) -> None:
         raise ValueError(
             "data.sample_artifact_mode must be one of: bundle, split, flac"
         )
+    architecture = resolve_model_architecture(config.model)
+    if architecture == LEGACY_VAE_ARCHITECTURE:
+        if artifact_mode == "flac":
+            raise ValueError(
+                "model.architecture=legacy_vae training requires precomputed "
+                "latent artifacts (data.sample_artifact_mode bundle or split)"
+            )
+        latent_fps = config.data.latent_fps
+        if isinstance(latent_fps, str):
+            if latent_fps.strip().lower() != "auto":
+                raise ValueError("data.latent_fps must be a number or 'auto'")
+        else:
+            require_positive(latent_fps, "data.latent_fps")
+        waveform_only_data_features = {
+            "data.amplitude_lift_enabled": config.data.amplitude_lift_enabled,
+            "data.source_resample_augmentation.enabled": (
+                config.data.source_resample_aug_enabled
+            ),
+            "data.source_codec_augmentation.enabled": (
+                config.data.source_codec_aug_enabled
+            ),
+        }
+        enabled = [name for name, value in waveform_only_data_features.items() if value]
+        if enabled:
+            raise ValueError(
+                "legacy_vae latent training does not support waveform-only data "
+                "transforms: " + ", ".join(enabled)
+            )
     batch_mode = str(config.data.batch_mode).strip().lower()
     if batch_mode not in {"standard", "song_local"}:
         raise ValueError("data.batch_mode must be one of: standard, song_local")
@@ -184,13 +217,32 @@ def validate_data_section(config: TrainConfig) -> None:
 
 def validate_model_section(config: TrainConfig) -> None:
     """Validate model architecture hyperparameter bounds and assumptions."""
+    architecture = resolve_model_architecture(config.model)
     if config.model.cond_channels not in {1, 2}:
         raise ValueError(
-            "Waveform training expects model.cond_channels to be 1 or 2 "
-            "for mono/stereo waveform conditioning."
+            "Training expects model.cond_channels to be 1 or 2 for mono/stereo "
+            "conditioning."
         )
     require_positive(config.model.target_channels, "model.target_channels")
     require_positive(config.model.patch_size, "model.patch_size")
+    if architecture == LEGACY_VAE_ARCHITECTURE:
+        if config.model.latent_dim is None:
+            raise ValueError("model.latent_dim is required for legacy_vae")
+        require_positive(config.model.latent_dim, "model.latent_dim")
+        if int(config.model.patch_size) != int(config.model.latent_dim):
+            raise ValueError(
+                "legacy_vae model.patch_size runtime alias must equal model.latent_dim"
+            )
+        if config.model.mix_style_dim != 0:
+            raise ValueError("legacy_vae architecture requires model.mix_style_dim=0")
+        if config.model.amplitude_gain_conditioning:
+            raise ValueError(
+                "legacy_vae architecture does not support amplitude gain conditioning"
+            )
+        if config.model.waveform_level_depth != 0:
+            raise ValueError(
+                "legacy_vae architecture requires model.waveform_level_depth=0"
+            )
     require_positive(config.model.hidden_dim, "model.hidden_dim")
     require_positive(config.model.num_layers, "model.num_layers")
     require_positive(config.model.num_heads, "model.num_heads")
@@ -217,7 +269,7 @@ def validate_model_section(config: TrainConfig) -> None:
     )
     if config.model.final_output_kernel_size % 2 == 0:
         raise ValueError("model.final_output_kernel_size must be odd")
-    if config.model.rope_enabled:
+    if architecture != LEGACY_VAE_ARCHITECTURE and config.model.rope_enabled:
         require_positive(config.model.rope_theta, "model.rope_theta")
         if config.model.rope_theta <= 1:
             raise ValueError("model.rope_theta must be > 1")
@@ -231,7 +283,10 @@ def validate_model_section(config: TrainConfig) -> None:
         else int(config.model.waveform_num_heads)
     )
     require_positive(waveform_num_heads, "model.waveform_num_heads")
-    if config.model.waveform_level_depth > 0:
+    if (
+        architecture != LEGACY_VAE_ARCHITECTURE
+        and config.model.waveform_level_depth > 0
+    ):
         if config.model.patch_size % config.model.waveform_micro_patch_size != 0:
             raise ValueError(
                 "model.patch_size must be divisible by "

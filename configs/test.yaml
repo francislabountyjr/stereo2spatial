@@ -22,6 +22,7 @@ data:
   drop_last: true
 
 model:
+  architecture: waveform
   target_channels: 12
   cond_channels: 2
   patch_size: 1024

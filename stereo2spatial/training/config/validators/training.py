@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from stereo2spatial.modeling.factory import (
+    LEGACY_VAE_ARCHITECTURE,
+    resolve_model_architecture,
+)
+
 from ..types import TrainConfig
 from .common import require_non_negative, require_positive
 
@@ -35,9 +40,11 @@ def validate_training_schedule(config: TrainConfig, sequence_mode: str) -> None:
     if config.training.init_from_checkpoint is not None:
         if not str(config.training.init_from_checkpoint).strip():
             raise ValueError("training.init_from_checkpoint cannot be empty")
-    init_weights_source = str(
-        getattr(config.training, "init_from_checkpoint_weights_source", "student")
-    ).strip().lower()
+    init_weights_source = (
+        str(getattr(config.training, "init_from_checkpoint_weights_source", "student"))
+        .strip()
+        .lower()
+    )
     if init_weights_source not in {"student", "ema", "auto"}:
         raise ValueError(
             "training.init_from_checkpoint_weights_source must be one of: "
@@ -203,19 +210,25 @@ def validate_training_schedule(config: TrainConfig, sequence_mode: str) -> None:
             "training.flow_loss_weighting must be one of: none, sigma_sqrt, cosmap"
         )
 
-    flow_one_step_input = str(
-        getattr(config.training, "flow_one_step_input", "zeros")
-    ).strip().lower()
+    flow_one_step_input = (
+        str(getattr(config.training, "flow_one_step_input", "zeros")).strip().lower()
+    )
     if flow_one_step_input not in {"zeros", "cond"}:
-        raise ValueError(
-            "training.flow_one_step_input must be one of: zeros, cond"
-        )
-    if flow_one_step_input == "cond" and getattr(config.training, "flow_one_step", False):
+        raise ValueError("training.flow_one_step_input must be one of: zeros, cond")
+    if flow_one_step_input == "cond" and getattr(
+        config.training, "flow_one_step", False
+    ):
         if config.model.target_channels != config.model.cond_channels:
             raise ValueError(
                 "training.flow_one_step_input=cond requires "
                 "model.target_channels == model.cond_channels"
             )
+    if resolve_model_architecture(config.model) == LEGACY_VAE_ARCHITECTURE and bool(
+        getattr(config.training, "flow_one_step", False)
+    ):
+        raise ValueError(
+            "training.flow_one_step is not supported by legacy_vae velocity-head models"
+        )
 
     if not isinstance(config.training.use_ema, bool):
         raise ValueError("training.use_ema must be true/false")
@@ -334,9 +347,7 @@ def validate_training_aux_losses(config: TrainConfig) -> None:
         + float(config.training.waveform_charbonnier_loss_weight)
         + float(config.training.x_pred_v_loss_weight)
     ) <= 0.0:
-        raise ValueError(
-            "At least one waveform/x-prediction loss weight must be > 0"
-        )
+        raise ValueError("At least one waveform/x-prediction loss weight must be > 0")
     stft_lists = (
         config.training.mrstft_fft_sizes,
         config.training.mrstft_hop_lengths,
@@ -464,6 +475,38 @@ def validate_training_aux_losses(config: TrainConfig) -> None:
     )
     require_positive(config.training.binaural_loss_eps, "training.binaural_loss_eps")
 
+    if resolve_model_architecture(config.model) == LEGACY_VAE_ARCHITECTURE:
+        waveform_only_losses = {
+            "training.downmix_consistency_weight": (
+                config.training.downmix_consistency_weight
+            ),
+            "training.mrstft_loss_weight": config.training.mrstft_loss_weight,
+            "training.perceptual_loss_weight": config.training.perceptual_loss_weight,
+            "training.binaural_ild_loss_weight": (
+                config.training.binaural_ild_loss_weight
+            ),
+            "training.binaural_ipd_loss_weight": (
+                config.training.binaural_ipd_loss_weight
+            ),
+            "training.binaural_ccf_loss_weight": (
+                config.training.binaural_ccf_loss_weight
+            ),
+            "training.binaural_frame_ild_loss_weight": (
+                config.training.binaural_frame_ild_loss_weight
+            ),
+            "training.binaural_mid_side_loss_weight": (
+                config.training.binaural_mid_side_loss_weight
+            ),
+        }
+        enabled = [
+            name for name, value in waveform_only_losses.items() if float(value) > 0.0
+        ]
+        if enabled:
+            raise ValueError(
+                "legacy_vae latent training does not support waveform-domain losses "
+                "without decoding: " + ", ".join(enabled)
+            )
+
     if (
         config.training.routing_kl_weight > 0
         or config.training.corr_weight > 0
@@ -477,5 +520,5 @@ def validate_training_aux_losses(config: TrainConfig) -> None:
         or config.training.binaural_mid_side_loss_weight > 0
     ) and config.training.tbptt_windows > 0:
         raise ValueError(
-            "waveform auxiliary losses currently require " "training.tbptt_windows=0."
+            "waveform auxiliary losses currently require training.tbptt_windows=0."
         )

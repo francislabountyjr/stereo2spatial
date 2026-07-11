@@ -26,6 +26,7 @@ from .solvers import (
     SolverController,
     stack_model_queries,
 )
+from .timestep_sampling import generate_spatial_signal_timestep_major
 from .windowing import (
     FixedWindowSpec,
     extract_fixed_window,
@@ -50,6 +51,7 @@ __all__ = [
     "export_model_bundle",
     "fixed_window_specs",
     "generate_spatial_signal",
+    "generate_spatial_signal_timestep_major",
     "group_compatible_queries",
     "read_audio_channels_first",
     "resolve_fixed_window_frames",

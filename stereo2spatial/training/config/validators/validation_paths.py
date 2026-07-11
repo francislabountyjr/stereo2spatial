@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from stereo2spatial.modeling.factory import is_legacy_vae_model
+
 from ..types import TrainConfig
 from .common import optional_str
 
@@ -43,10 +45,17 @@ def validate_validation_paths(config: TrainConfig) -> None:
 
     if config.training.run_validation_generations:
         if (
+            is_legacy_vae_model(config)
+            and optional_str(config.training.validation_generation_vae_checkpoint_path)
+            is None
+        ):
+            raise ValueError(
+                "training.validation_generation_vae_checkpoint_path is required "
+                "for legacy_vae generation validation"
+            )
+        if (
             bool(getattr(config.data, "amplitude_lift_enabled", False))
-            and str(getattr(config.data, "amplitude_lift_mode", "rms"))
-            .strip()
-            .lower()
+            and str(getattr(config.data, "amplitude_lift_mode", "rms")).strip().lower()
             != "wavflow"
             and str(getattr(config.data, "amplitude_lift_reference", "source"))
             .strip()
@@ -99,8 +108,7 @@ def validate_validation_paths(config: TrainConfig) -> None:
             and config.training.validation_generation_chunk_seconds <= 0
         ):
             raise ValueError(
-                "training.validation_generation_chunk_seconds must be > 0 "
-                "when provided"
+                "training.validation_generation_chunk_seconds must be > 0 when provided"
             )
         if config.training.validation_generation_overlap_seconds < 0:
             raise ValueError(

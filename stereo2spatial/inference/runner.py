@@ -1,13 +1,19 @@
-"""Top-level inference orchestration from stereo waveform to spatial waveform."""
+"""Top-level audio inference for waveform and v1-compatible latent models."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast
 
 import torch
 
+from stereo2spatial.codecs.ear_vae import (
+    decode_channels_independent,
+    encode_channels_independent,
+    load_vae,
+    vae_encode,
+)
 from stereo2spatial.common.amplitude_lift import (
     amplitude_lift_log_gain,
     apply_amplitude_lift,
@@ -21,12 +27,18 @@ from stereo2spatial.common.mix_style import (
     mix_style_dict_to_vector,
     mix_style_preset_values,
 )
-from stereo2spatial.modeling import SpatialDiT
+from stereo2spatial.modeling import (
+    SpatialModel,
+    build_spatial_model,
+    is_legacy_vae_model,
+)
 from stereo2spatial.training.config import TrainConfig
 
 from .audio import read_audio_channels_first, write_audio_channels_first
 from .checkpoint import load_model_weights, resolve_checkpoint_path
+from .export_bundle import LEGACY_VAE_SAMPLE_RATE
 from .sampling import generate_spatial_signal, resolve_chunk_frames
+from .timestep_sampling import generate_spatial_signal_timestep_major
 
 RequestedSolverName = Literal[
     "auto",
@@ -57,6 +69,7 @@ ResolvedSolverName = Literal[
 ]
 WeightsSource = Literal["auto", "ema", "student"]
 InferenceDTypeName = Literal["float32", "float16", "bfloat16", "auto"]
+SamplingOrder = Literal["window_major", "timestep_major"]
 
 _INFERENCE_SOLVERS = {
     "dopri5",
@@ -164,6 +177,7 @@ class InferenceReport(TypedDict):
     solver_steps: int
     solver_rtol: float
     solver_atol: float
+    sampling_order: SamplingOrder
     seed: int
     mix_style: list[float] | None
     mix_style_preset: str | None
@@ -179,6 +193,8 @@ class InferenceReport(TypedDict):
     compiled: bool
     compile_mode: str | None
     inference_dtype: str
+    architecture: str
+    representation: str
 
 
 @dataclass
@@ -193,6 +209,7 @@ class InferenceSession:
     compiled: bool
     compile_mode: str | None
     run_dtype: torch.dtype = torch.float32
+    vae: torch.nn.Module | None = None
 
 
 def _resolve_inference_dtype(
@@ -255,33 +272,9 @@ def _resolve_inference_mix_style(
     return torch.tensor(values, dtype=torch.float32).view(1, -1)
 
 
-def _build_model_from_config(config: TrainConfig) -> SpatialDiT:
+def _build_model_from_config(config: TrainConfig) -> SpatialModel:
     """Instantiate the inference model described by a resolved config."""
-    return SpatialDiT(
-        target_channels=config.model.target_channels,
-        cond_channels=config.model.cond_channels,
-        patch_size=config.model.patch_size,
-        hidden_dim=config.model.hidden_dim,
-        num_layers=config.model.num_layers,
-        num_heads=config.model.num_heads,
-        mlp_ratio=config.model.mlp_ratio,
-        dropout=config.model.dropout,
-        timestep_embed_dim=config.model.timestep_embed_dim,
-        timestep_scale=config.model.timestep_scale,
-        max_period=config.model.max_period,
-        num_memory_tokens=getattr(config.model, "num_memory_tokens", 0),
-        mix_style_dim=getattr(config.model, "mix_style_dim", 0),
-        waveform_level_depth=getattr(config.model, "waveform_level_depth", 0),
-        waveform_micro_patch_size=getattr(config.model, "waveform_micro_patch_size", 16),
-        waveform_hidden_dim=getattr(config.model, "waveform_hidden_dim", 16),
-        waveform_num_heads=getattr(config.model, "waveform_num_heads", None),
-        waveform_mlp_ratio=getattr(config.model, "waveform_mlp_ratio", 2.0),
-        final_output_kernel_size=getattr(config.model, "final_output_kernel_size", 7),
-        final_output_zero_init=getattr(config.model, "final_output_zero_init", False),
-        rope_enabled=getattr(config.model, "rope_enabled", True),
-        rope_theta=getattr(config.model, "rope_theta", 10000.0),
-        activation_checkpointing=getattr(config.model, "activation_checkpointing", False),
-    )
+    return build_spatial_model(config.model)
 
 
 def build_inference_session(
@@ -292,6 +285,8 @@ def build_inference_session(
     compile_model: bool = False,
     compile_mode: str = "default",
     inference_dtype: InferenceDTypeName = "float32",
+    vae_checkpoint_path: str | Path | None = None,
+    vae_config_path: str | Path | None = None,
 ) -> InferenceSession:
     """Build, load, move, and optionally compile an inference model once."""
     run_device = torch.device(device) if device else _default_device()
@@ -299,6 +294,16 @@ def build_inference_session(
         checkpoint=checkpoint,
         output_dir=config.output_dir,
     )
+    legacy_vae = is_legacy_vae_model(config)
+    if legacy_vae and vae_checkpoint_path is None:
+        raise ValueError(
+            "legacy_vae inference requires an EAR-VAE checkpoint. Pass "
+            "vae_checkpoint_path or use an exported bundle containing vae/."
+        )
+    if vae_checkpoint_path is not None and not Path(vae_checkpoint_path).exists():
+        raise FileNotFoundError(f"EAR-VAE checkpoint not found: {vae_checkpoint_path}")
+    if vae_config_path is not None and not Path(vae_config_path).exists():
+        raise FileNotFoundError(f"EAR-VAE config not found: {vae_config_path}")
 
     model = _build_model_from_config(config)
     used_weights_source = load_model_weights(
@@ -312,13 +317,25 @@ def build_inference_session(
     )
     model = model.to(device=run_device, dtype=run_dtype)
     model.eval()
+    vae: torch.nn.Module | None = None
+    if legacy_vae:
+        assert vae_checkpoint_path is not None
+        vae = load_vae(
+            vae_checkpoint_path=vae_checkpoint_path,
+            config_path=vae_config_path,
+            device=run_device,
+            torch_dtype=torch.float32,
+        )
     compiled = False
     resolved_compile_mode: str | None = None
     if compile_model:
         if not hasattr(torch, "compile"):
             raise RuntimeError("torch.compile is unavailable in this PyTorch build.")
         resolved_compile_mode = str(compile_mode).strip().lower()
-        model = torch.compile(model, mode=resolved_compile_mode)  # type: ignore[assignment]
+        model = cast(
+            torch.nn.Module,
+            torch.compile(model, mode=resolved_compile_mode),
+        )
         compiled = True
 
     return InferenceSession(
@@ -330,6 +347,7 @@ def build_inference_session(
         compiled=compiled,
         compile_mode=resolved_compile_mode,
         run_dtype=run_dtype,
+        vae=vae,
     )
 
 
@@ -350,18 +368,29 @@ def run_inference_with_session(
     normalize_peak: bool,
     mix_style: list[float] | dict[str, float] | None = None,
     mix_style_preset: str | None = None,
+    encode_chunk_size_samples: int | None = None,
+    encode_overlap_samples: int | None = None,
+    decode_chunk_size_frames: int = 2048,
+    decode_overlap_frames: int = 256,
+    disable_chunked_decode: bool = False,
+    sampling_order: SamplingOrder | str = "timestep_major",
 ) -> InferenceReport:
     """
     Run inference for one file using an already-loaded inference session.
 
     The output channel count is set by ``session.config.model.target_channels``.
     """
-    del show_progress
     config = session.config
     model = session.model
     run_device = session.run_device
     run_dtype = session.run_dtype
     checkpoint_path = session.checkpoint_path
+    legacy_vae = is_legacy_vae_model(config)
+    if legacy_vae and int(sample_rate) != LEGACY_VAE_SAMPLE_RATE:
+        raise ValueError(
+            "legacy_vae inference requires sample_rate=48000 because the "
+            "EAR-VAE codec is fixed at 48 kHz."
+        )
 
     input_path = Path(input_audio_path)
     output_path = Path(output_audio_path)
@@ -376,9 +405,13 @@ def run_inference_with_session(
             f"Input must be mono or stereo. Got channels={audio.shape[0]} for {input_path}"
         )
 
-    conditioning_audio = _prepare_conditioning_audio(
-        audio.float(),
-        cond_channels=int(config.model.cond_channels),
+    conditioning_audio = (
+        audio.float()
+        if legacy_vae
+        else _prepare_conditioning_audio(
+            audio.float(),
+            cond_channels=int(config.model.cond_channels),
+        )
     )
     amplitude_lift_gain = None
     amplitude_lift_log_gain_tensor: torch.Tensor | None = None
@@ -391,6 +424,11 @@ def run_inference_with_session(
     _lift_min = getattr(config.data, "amplitude_lift_gain_min_value", None)
     _lift_output_lufs = float(getattr(config.data, "amplitude_lift_output_lufs", -23.0))
     if bool(getattr(config.data, "amplitude_lift_enabled", False)):
+        if legacy_vae:
+            raise ValueError(
+                "Amplitude lifting is waveform-only and cannot be used with "
+                "legacy_vae latent inference."
+            )
         lift_reference = (
             str(getattr(config.data, "amplitude_lift_reference", "source"))
             .strip()
@@ -444,10 +482,59 @@ def run_inference_with_session(
                 gain_min_value=_lift_min,
                 eps=float(getattr(config.data, "amplitude_lift_eps", 1.0e-8)),
             ).to(run_device, dtype=run_dtype)
-    cond_signal, input_samples = _patch_audio(
-        conditioning_audio,
-        patch_size=int(config.model.patch_size),
-    )
+    input_samples = int(conditioning_audio.shape[-1])
+    if legacy_vae:
+        if session.vae is None:
+            raise RuntimeError("legacy_vae inference session is missing its VAE")
+        if int(config.model.cond_channels) == 1:
+            encoded = vae_encode(
+                vae=session.vae,
+                audio=conditioning_audio,
+                sample_rate=actual_sample_rate,
+                use_sample=False,
+                use_chunked_encode=True,
+                chunk_size_samples=encode_chunk_size_samples,
+                overlap_samples=encode_overlap_samples,
+                duplicate_mono_to_stereo=True,
+                offload_latent_to_cpu=False,
+                show_progress=show_progress,
+                device=run_device,
+            )
+            if encoded.dim() != 2:
+                raise ValueError(
+                    "Expected EAR-VAE conditioning latent [D,T], "
+                    f"got {tuple(encoded.shape)}"
+                )
+            cond_signal = encoded.unsqueeze(0).contiguous()
+        else:
+            cond_signal = encode_channels_independent(
+                vae=session.vae,
+                audio=_prepare_conditioning_audio(
+                    conditioning_audio,
+                    cond_channels=int(config.model.cond_channels),
+                ),
+                sample_rate=actual_sample_rate,
+                use_sample=False,
+                use_chunked_encode=True,
+                chunk_size_samples=encode_chunk_size_samples,
+                overlap_samples=encode_overlap_samples,
+                offload_latent_to_cpu=False,
+                show_progress=show_progress,
+                device=run_device,
+            )
+        expected_latent_dim = int(
+            getattr(config.model, "latent_dim", None) or config.model.patch_size
+        )
+        if int(cond_signal.shape[1]) != expected_latent_dim:
+            raise ValueError(
+                "EAR-VAE latent width does not match model.latent_dim: "
+                f"{int(cond_signal.shape[1])} != {expected_latent_dim}"
+            )
+    else:
+        cond_signal, input_samples = _patch_audio(
+            conditioning_audio,
+            patch_size=int(config.model.patch_size),
+        )
     mix_style_tensor = _resolve_inference_mix_style(
         raw_mix_style=mix_style,
         mix_style_dim=int(getattr(config.model, "mix_style_dim", 0)),
@@ -458,11 +545,28 @@ def run_inference_with_session(
     target_chunk_seconds = (
         float(chunk_seconds)
         if chunk_seconds is not None
-        else float(config.data.segment_seconds)
+        else float(
+            getattr(
+                config.training,
+                "window_seconds",
+                config.data.segment_seconds,
+            )
+        )
     )
-    patch_fps = float(actual_sample_rate) / float(config.model.patch_size)
+    if legacy_vae:
+        latent_fps = getattr(config.data, "latent_fps", 50.0)
+        patch_fps = (
+            50.0 if str(latent_fps).strip().lower() == "auto" else float(latent_fps)
+        )
+    else:
+        patch_fps = float(actual_sample_rate) / float(config.model.patch_size)
+    # Training always presents a fixed-size padded window, including for short
+    # clips. Ask the sampler for that same window size instead of shrinking the
+    # model context to the input length; the selected sampler supplies the valid
+    # mask and removes the padded tail during stitching.
+    requested_chunk_frames = max(1, int(round(target_chunk_seconds * patch_fps)))
     chunk_frames, overlap_frames = resolve_chunk_frames(
-        cond_signal_frames=cond_signal.shape[-1],
+        cond_signal_frames=max(int(cond_signal.shape[-1]), requested_chunk_frames),
         patch_fps=patch_fps,
         chunk_seconds=target_chunk_seconds,
         overlap_seconds=overlap_seconds,
@@ -471,7 +575,16 @@ def run_inference_with_session(
     resolved_solver = _resolve_inference_solver(requested_solver=solver)
     resolved_solver_steps = 64 if solver_steps is None else max(1, int(solver_steps))
 
-    pred_signal = generate_spatial_signal(
+    resolved_sampling_order = str(sampling_order).strip().lower().replace("-", "_")
+    if resolved_sampling_order not in {"window_major", "timestep_major"}:
+        raise ValueError("sampling_order must be 'window_major' or 'timestep_major'")
+    sampler = (
+        generate_spatial_signal_timestep_major
+        if resolved_sampling_order == "timestep_major"
+        else generate_spatial_signal
+    )
+
+    pred_signal = sampler(
         model=model,
         cond_signal=cond_signal.to(run_device, dtype=run_dtype),
         chunk_frames=chunk_frames,
@@ -491,7 +604,26 @@ def run_inference_with_session(
         one_step_input=str(getattr(config.training, "flow_one_step_input", "zeros")),
     )
 
-    decoded = _unpatch_audio(pred_signal.cpu().float(), sample_count=input_samples)
+    if legacy_vae:
+        assert session.vae is not None
+        decoded = (
+            decode_channels_independent(
+                vae=session.vae,
+                channel_latents=pred_signal.to(run_device, dtype=torch.float32),
+                use_chunked_decode=not disable_chunked_decode,
+                chunk_size_frames=decode_chunk_size_frames,
+                overlap_frames=decode_overlap_frames,
+                offload_wav_to_cpu=True,
+                reduction="mean",
+                show_progress=show_progress,
+                device=run_device,
+            )
+            .float()
+            .cpu()
+        )
+        decoded = decoded[:, :input_samples].contiguous()
+    else:
+        decoded = _unpatch_audio(pred_signal.cpu().float(), sample_count=input_samples)
     if amplitude_lift_gain is not None:
         if amplitude_lift_mode == "wavflow":
             decoded = undo_wavflow_output_lift(
@@ -544,6 +676,7 @@ def run_inference_with_session(
         "solver_steps": int(resolved_solver_steps),
         "solver_rtol": float(solver_rtol),
         "solver_atol": float(solver_atol),
+        "sampling_order": cast(SamplingOrder, resolved_sampling_order),
         "seed": int(seed),
         "mix_style": (
             [float(x) for x in mix_style_tensor.flatten().tolist()]
@@ -581,6 +714,8 @@ def run_inference_with_session(
         "compiled": bool(session.compiled),
         "compile_mode": session.compile_mode,
         "inference_dtype": str(run_dtype).replace("torch.", ""),
+        "architecture": str(getattr(config.model, "architecture", "waveform")),
+        "representation": "latent" if legacy_vae else "waveform",
     }
     return report
 
@@ -608,6 +743,14 @@ def run_inference(
     compile_model: bool = False,
     compile_mode: str = "default",
     inference_dtype: InferenceDTypeName = "float32",
+    vae_checkpoint_path: str | Path | None = None,
+    vae_config_path: str | Path | None = None,
+    encode_chunk_size_samples: int | None = None,
+    encode_overlap_samples: int | None = None,
+    decode_chunk_size_frames: int = 2048,
+    decode_overlap_frames: int = 256,
+    disable_chunked_decode: bool = False,
+    sampling_order: SamplingOrder | str = "timestep_major",
 ) -> InferenceReport:
     """
     Run end-to-end inference from input waveform to rendered multichannel WAV.
@@ -624,21 +767,32 @@ def run_inference(
         compile_model=compile_model,
         compile_mode=compile_mode,
         inference_dtype=inference_dtype,
+        vae_checkpoint_path=vae_checkpoint_path,
+        vae_config_path=vae_config_path,
     )
-    return run_inference_with_session(
-        session=session,
-        input_audio_path=input_audio_path,
-        output_audio_path=output_audio_path,
-        sample_rate=sample_rate,
-        chunk_seconds=chunk_seconds,
-        overlap_seconds=overlap_seconds,
-        solver=solver,
-        solver_steps=solver_steps,
-        solver_rtol=solver_rtol,
-        solver_atol=solver_atol,
-        seed=seed,
-        show_progress=show_progress,
-        normalize_peak=normalize_peak,
-        mix_style=mix_style,
-        mix_style_preset=mix_style_preset,
+    return cast(
+        InferenceReport,
+        run_inference_with_session(
+            session=session,
+            input_audio_path=input_audio_path,
+            output_audio_path=output_audio_path,
+            sample_rate=sample_rate,
+            chunk_seconds=chunk_seconds,
+            overlap_seconds=overlap_seconds,
+            solver=solver,
+            solver_steps=solver_steps,
+            solver_rtol=solver_rtol,
+            solver_atol=solver_atol,
+            seed=seed,
+            show_progress=show_progress,
+            normalize_peak=normalize_peak,
+            mix_style=mix_style,
+            mix_style_preset=mix_style_preset,
+            encode_chunk_size_samples=encode_chunk_size_samples,
+            encode_overlap_samples=encode_overlap_samples,
+            decode_chunk_size_frames=decode_chunk_size_frames,
+            decode_overlap_frames=decode_overlap_frames,
+            disable_chunked_decode=disable_chunked_decode,
+            sampling_order=sampling_order,
+        ),
     )
