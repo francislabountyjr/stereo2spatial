@@ -43,8 +43,7 @@ Thumbs.db
 
 # Local scratch outputs and non-core experiments
 validation_generation*/
+inference_comparison/
 out*/
-web/
 test/
 New folder/
-docs/dynamic_batching_inference.md
