@@ -9,10 +9,11 @@ from .common import require_non_negative, require_positive
 def validate_optimizer_section(config: TrainConfig) -> None:
     """Validate optimizer family and its core numeric parameters."""
     optimizer_type = config.optimizer.type.strip().lower()
-    if optimizer_type not in {"adamw", "adam"}:
-        raise ValueError("optimizer.type must be one of: adamw, adam")
+    if optimizer_type not in {"adamw", "adam", "muon"}:
+        raise ValueError("optimizer.type must be one of: adamw, adam, muon")
     require_positive(config.optimizer.lr, "optimizer.lr")
     require_positive(config.optimizer.eps, "optimizer.eps")
+    require_positive(config.optimizer.muon_ns_steps, "optimizer.muon_ns_steps")
     if (
         optimizer_type == "adamw"
         and config.optimizer.adamw_fused

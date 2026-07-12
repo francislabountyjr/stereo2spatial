@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from stereo2spatial.modeling.factory import (
+    LEGACY_VAE_ARCHITECTURE,
+    resolve_model_architecture,
+)
+
 from ..types import TrainConfig
 from .common import require_non_negative, require_positive
 
@@ -35,6 +40,16 @@ def validate_training_schedule(config: TrainConfig, sequence_mode: str) -> None:
     if config.training.init_from_checkpoint is not None:
         if not str(config.training.init_from_checkpoint).strip():
             raise ValueError("training.init_from_checkpoint cannot be empty")
+    init_weights_source = (
+        str(getattr(config.training, "init_from_checkpoint_weights_source", "student"))
+        .strip()
+        .lower()
+    )
+    if init_weights_source not in {"student", "ema", "auto"}:
+        raise ValueError(
+            "training.init_from_checkpoint_weights_source must be one of: "
+            "student, ema, auto"
+        )
 
     require_positive(config.training.log_every, "training.log_every")
     require_positive(config.training.checkpoint_every, "training.checkpoint_every")
@@ -127,7 +142,9 @@ def validate_training_schedule(config: TrainConfig, sequence_mode: str) -> None:
     if config.training.scheduled_sampling_reflexflow is not None and not isinstance(
         config.training.scheduled_sampling_reflexflow, bool
     ):
-        raise ValueError("training.scheduled_sampling_reflexflow must be null/true/false")
+        raise ValueError(
+            "training.scheduled_sampling_reflexflow must be null/true/false"
+        )
     require_non_negative(
         config.training.scheduled_sampling_reflexflow_alpha,
         "training.scheduled_sampling_reflexflow_alpha",
@@ -160,7 +177,9 @@ def validate_training_schedule(config: TrainConfig, sequence_mode: str) -> None:
                 )
 
     if config.training.flow_schedule_shift is not None:
-        require_positive(config.training.flow_schedule_shift, "training.flow_schedule_shift")
+        require_positive(
+            config.training.flow_schedule_shift, "training.flow_schedule_shift"
+        )
     require_positive(
         config.training.flow_schedule_base_seq_len,
         "training.flow_schedule_base_seq_len",
@@ -169,7 +188,10 @@ def validate_training_schedule(config: TrainConfig, sequence_mode: str) -> None:
         config.training.flow_schedule_max_seq_len,
         "training.flow_schedule_max_seq_len",
     )
-    if config.training.flow_schedule_max_seq_len <= config.training.flow_schedule_base_seq_len:
+    if (
+        config.training.flow_schedule_max_seq_len
+        <= config.training.flow_schedule_base_seq_len
+    ):
         raise ValueError(
             "training.flow_schedule_max_seq_len must be > training.flow_schedule_base_seq_len"
         )
@@ -186,6 +208,26 @@ def validate_training_schedule(config: TrainConfig, sequence_mode: str) -> None:
     if flow_loss_weighting not in {"none", "sigma_sqrt", "cosmap"}:
         raise ValueError(
             "training.flow_loss_weighting must be one of: none, sigma_sqrt, cosmap"
+        )
+
+    flow_one_step_input = (
+        str(getattr(config.training, "flow_one_step_input", "zeros")).strip().lower()
+    )
+    if flow_one_step_input not in {"zeros", "cond"}:
+        raise ValueError("training.flow_one_step_input must be one of: zeros, cond")
+    if flow_one_step_input == "cond" and getattr(
+        config.training, "flow_one_step", False
+    ):
+        if config.model.target_channels != config.model.cond_channels:
+            raise ValueError(
+                "training.flow_one_step_input=cond requires "
+                "model.target_channels == model.cond_channels"
+            )
+    if resolve_model_architecture(config.model) == LEGACY_VAE_ARCHITECTURE and bool(
+        getattr(config.training, "flow_one_step", False)
+    ):
+        raise ValueError(
+            "training.flow_one_step is not supported by legacy_vae velocity-head models"
         )
 
     if not isinstance(config.training.use_ema, bool):
@@ -215,7 +257,9 @@ def validate_training_gan(config: TrainConfig) -> None:
         raise ValueError("training.gan_d_beta1 must be in [0, 1)")
     if config.training.gan_d_beta2 < 0 or config.training.gan_d_beta2 >= 1:
         raise ValueError("training.gan_d_beta2 must be in [0, 1)")
-    require_positive(config.training.gan_d_base_channels, "training.gan_d_base_channels")
+    require_positive(
+        config.training.gan_d_base_channels, "training.gan_d_base_channels"
+    )
     require_positive(config.training.gan_d_num_layers, "training.gan_d_num_layers")
     require_positive(config.training.gan_d_fine_layers, "training.gan_d_fine_layers")
     require_positive(
@@ -238,8 +282,10 @@ def validate_training_gan(config: TrainConfig) -> None:
 
 
 def validate_training_aux_losses(config: TrainConfig) -> None:
-    """Validate optional routing/correlation auxiliary losses."""
-    require_non_negative(config.training.routing_kl_weight, "training.routing_kl_weight")
+    """Validate optional waveform auxiliary losses."""
+    require_non_negative(
+        config.training.routing_kl_weight, "training.routing_kl_weight"
+    )
     require_positive(
         config.training.routing_kl_temperature,
         "training.routing_kl_temperature",
@@ -248,12 +294,231 @@ def validate_training_aux_losses(config: TrainConfig) -> None:
 
     require_non_negative(config.training.corr_weight, "training.corr_weight")
     require_positive(config.training.corr_eps, "training.corr_eps")
-
+    require_non_negative(
+        config.training.downmix_consistency_weight,
+        "training.downmix_consistency_weight",
+    )
+    downmix_loss = str(config.training.downmix_consistency_loss).strip().lower()
+    if downmix_loss not in {"mse", "l2", "l1", "mae"}:
+        raise ValueError(
+            "training.downmix_consistency_loss must be one of: mse, l2, l1, mae"
+        )
+    if config.training.downmix_channel_order is not None:
+        if len(config.training.downmix_channel_order) != config.model.target_channels:
+            raise ValueError(
+                "training.downmix_channel_order length must match model.target_channels"
+            )
+    _require_unit_interval(
+        config.training.mix_style_dropout_probability,
+        "training.mix_style_dropout_probability",
+    )
+    require_non_negative(
+        config.training.mrstft_loss_weight, "training.mrstft_loss_weight"
+    )
+    require_non_negative(config.training.mrstft_sc_weight, "training.mrstft_sc_weight")
+    require_non_negative(
+        config.training.mrstft_log_mag_weight,
+        "training.mrstft_log_mag_weight",
+    )
+    require_positive(config.training.mrstft_eps, "training.mrstft_eps")
+    require_non_negative(
+        config.training.waveform_mse_loss_weight,
+        "training.waveform_mse_loss_weight",
+    )
+    require_non_negative(
+        config.training.waveform_l1_loss_weight,
+        "training.waveform_l1_loss_weight",
+    )
+    require_non_negative(
+        config.training.waveform_charbonnier_loss_weight,
+        "training.waveform_charbonnier_loss_weight",
+    )
+    require_positive(
+        config.training.waveform_charbonnier_eps,
+        "training.waveform_charbonnier_eps",
+    )
+    require_non_negative(
+        config.training.x_pred_v_loss_weight,
+        "training.x_pred_v_loss_weight",
+    )
     if (
-        (config.training.routing_kl_weight > 0 or config.training.corr_weight > 0)
-        and config.training.tbptt_windows > 0
+        float(config.training.waveform_mse_loss_weight)
+        + float(config.training.waveform_l1_loss_weight)
+        + float(config.training.waveform_charbonnier_loss_weight)
+        + float(config.training.x_pred_v_loss_weight)
+    ) <= 0.0:
+        raise ValueError("At least one waveform/x-prediction loss weight must be > 0")
+    stft_lists = (
+        config.training.mrstft_fft_sizes,
+        config.training.mrstft_hop_lengths,
+        config.training.mrstft_win_lengths,
+    )
+    if len({len(values or []) for values in stft_lists}) != 1:
+        raise ValueError(
+            "training.mrstft_fft_sizes, mrstft_hop_lengths, and "
+            "mrstft_win_lengths must have the same length"
+        )
+    if config.training.mrstft_loss_weight > 0 and not config.training.mrstft_fft_sizes:
+        raise ValueError(
+            "training.mrstft_fft_sizes must not be empty when MR-STFT is enabled"
+        )
+    for n_fft, hop_length, win_length in zip(
+        config.training.mrstft_fft_sizes or [],
+        config.training.mrstft_hop_lengths or [],
+        config.training.mrstft_win_lengths or [],
+    ):
+        require_positive(n_fft, "training.mrstft_fft_sizes")
+        require_positive(hop_length, "training.mrstft_hop_lengths")
+        require_positive(win_length, "training.mrstft_win_lengths")
+        if win_length > n_fft:
+            raise ValueError(
+                "training.mrstft_win_lengths values must be <= mrstft_fft_sizes"
+            )
+
+    require_non_negative(
+        config.training.perceptual_loss_weight,
+        "training.perceptual_loss_weight",
+    )
+    require_positive(config.training.perceptual_n_fft, "training.perceptual_n_fft")
+    require_positive(
+        config.training.perceptual_hop_length,
+        "training.perceptual_hop_length",
+    )
+    require_positive(
+        config.training.perceptual_win_length,
+        "training.perceptual_win_length",
+    )
+    require_positive(config.training.perceptual_n_mels, "training.perceptual_n_mels")
+    require_non_negative(config.training.perceptual_f_min, "training.perceptual_f_min")
+    if config.training.perceptual_win_length > config.training.perceptual_n_fft:
+        raise ValueError("training.perceptual_win_length must be <= perceptual_n_fft")
+    if config.training.perceptual_f_max is not None and (
+        float(config.training.perceptual_f_max)
+        <= float(config.training.perceptual_f_min)
     ):
         raise ValueError(
-            "channel routing/correlation losses currently require "
-            "training.tbptt_windows=0."
+            "training.perceptual_f_max must be greater than perceptual_f_min"
+        )
+    require_non_negative(
+        config.training.perceptual_band_weight,
+        "training.perceptual_band_weight",
+    )
+    require_non_negative(
+        config.training.perceptual_band_low_hz,
+        "training.perceptual_band_low_hz",
+    )
+    if float(config.training.perceptual_band_high_hz) <= float(
+        config.training.perceptual_band_low_hz
+    ):
+        raise ValueError(
+            "training.perceptual_band_high_hz must be greater than "
+            "perceptual_band_low_hz"
+        )
+    require_positive(config.training.perceptual_eps, "training.perceptual_eps")
+    require_non_negative(
+        config.training.binaural_ild_loss_weight,
+        "training.binaural_ild_loss_weight",
+    )
+    require_non_negative(
+        config.training.binaural_ipd_loss_weight,
+        "training.binaural_ipd_loss_weight",
+    )
+    require_non_negative(
+        config.training.binaural_ccf_loss_weight,
+        "training.binaural_ccf_loss_weight",
+    )
+    require_non_negative(
+        config.training.binaural_frame_ild_loss_weight,
+        "training.binaural_frame_ild_loss_weight",
+    )
+    require_positive(
+        config.training.binaural_frame_ild_frame_size,
+        "training.binaural_frame_ild_frame_size",
+    )
+    require_positive(
+        config.training.binaural_frame_ild_hop_size,
+        "training.binaural_frame_ild_hop_size",
+    )
+    require_non_negative(
+        config.training.binaural_frame_ild_silence_threshold,
+        "training.binaural_frame_ild_silence_threshold",
+    )
+    require_positive(
+        config.training.binaural_frame_ild_max_weight,
+        "training.binaural_frame_ild_max_weight",
+    )
+    require_non_negative(
+        config.training.binaural_mid_side_loss_weight,
+        "training.binaural_mid_side_loss_weight",
+    )
+    mid_side_loss = str(config.training.binaural_mid_side_loss_type).strip().lower()
+    if mid_side_loss not in {"mse", "l2", "l1", "mae", "charbonnier", "charb"}:
+        raise ValueError(
+            "training.binaural_mid_side_loss_type must be one of: "
+            "mse, l2, l1, mae, charbonnier, charb"
+        )
+    require_non_negative(
+        config.training.binaural_mid_side_mid_weight,
+        "training.binaural_mid_side_mid_weight",
+    )
+    require_non_negative(
+        config.training.binaural_mid_side_side_weight,
+        "training.binaural_mid_side_side_weight",
+    )
+    require_positive(
+        config.training.binaural_mid_side_charbonnier_eps,
+        "training.binaural_mid_side_charbonnier_eps",
+    )
+    require_non_negative(
+        config.training.binaural_loss_warmup_steps,
+        "training.binaural_loss_warmup_steps",
+    )
+    require_positive(config.training.binaural_loss_eps, "training.binaural_loss_eps")
+
+    if resolve_model_architecture(config.model) == LEGACY_VAE_ARCHITECTURE:
+        waveform_only_losses = {
+            "training.downmix_consistency_weight": (
+                config.training.downmix_consistency_weight
+            ),
+            "training.mrstft_loss_weight": config.training.mrstft_loss_weight,
+            "training.perceptual_loss_weight": config.training.perceptual_loss_weight,
+            "training.binaural_ild_loss_weight": (
+                config.training.binaural_ild_loss_weight
+            ),
+            "training.binaural_ipd_loss_weight": (
+                config.training.binaural_ipd_loss_weight
+            ),
+            "training.binaural_ccf_loss_weight": (
+                config.training.binaural_ccf_loss_weight
+            ),
+            "training.binaural_frame_ild_loss_weight": (
+                config.training.binaural_frame_ild_loss_weight
+            ),
+            "training.binaural_mid_side_loss_weight": (
+                config.training.binaural_mid_side_loss_weight
+            ),
+        }
+        enabled = [
+            name for name, value in waveform_only_losses.items() if float(value) > 0.0
+        ]
+        if enabled:
+            raise ValueError(
+                "legacy_vae latent training does not support waveform-domain losses "
+                "without decoding: " + ", ".join(enabled)
+            )
+
+    if (
+        config.training.routing_kl_weight > 0
+        or config.training.corr_weight > 0
+        or config.training.downmix_consistency_weight > 0
+        or config.training.mrstft_loss_weight > 0
+        or config.training.perceptual_loss_weight > 0
+        or config.training.binaural_ild_loss_weight > 0
+        or config.training.binaural_ipd_loss_weight > 0
+        or config.training.binaural_ccf_loss_weight > 0
+        or config.training.binaural_frame_ild_loss_weight > 0
+        or config.training.binaural_mid_side_loss_weight > 0
+    ) and config.training.tbptt_windows > 0:
+        raise ValueError(
+            "waveform auxiliary losses currently require training.tbptt_windows=0."
         )

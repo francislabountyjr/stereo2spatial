@@ -18,13 +18,19 @@ venv/
 .vscode/
 
 # Artifacts and datasets
+ignore/
 dataset/
 dataset_qc_subset/
+stereo2spatial_dataset*/
+_parallel_preprocess_bench/
+_parallel_preprocess/
 runs/
 checkpoints/
 dataset_paths.csv
 dataset_paths copy.csv
 atmos_filter_report.csv
+configs/train_headphone_virtualizer_*.yaml
+commands.txt
 
 # Local exports and reports
 *.ipynb_checkpoints
@@ -34,3 +40,10 @@ atmos_filter_report.csv
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local scratch outputs and non-core experiments
+validation_generation*/
+inference_comparison/
+out*/
+test/
+New folder/

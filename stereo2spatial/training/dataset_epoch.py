@@ -1,4 +1,4 @@
-"""Epoch planning and latent-fps resolution helpers for dataset scheduling."""
+"""Epoch planning and signal-fps resolution helpers for dataset scheduling."""
 
 from __future__ import annotations
 
@@ -8,16 +8,16 @@ from statistics import median
 from .dataset_types import ConditioningSource, EpochSegment, SongRecord
 
 
-def _resolve_latent_fps(latent_fps: float | str, songs: list[SongRecord]) -> float:
-    """Resolve configured latent FPS, supporting numeric values and ``auto``."""
-    if isinstance(latent_fps, (int, float)):
-        value = float(latent_fps)
+def _resolve_patch_fps(patch_fps: float | str, songs: list[SongRecord]) -> float:
+    """Resolve configured signal FPS, supporting numeric values and ``auto``."""
+    if isinstance(patch_fps, (int, float)):
+        value = float(patch_fps)
         if value <= 0:
-            raise ValueError("latent_fps must be > 0")
+            raise ValueError("patch_fps must be > 0")
         return value
 
-    if not isinstance(latent_fps, str) or latent_fps.lower() != "auto":
-        raise ValueError("latent_fps must be a number or 'auto'")
+    if not isinstance(patch_fps, str) or patch_fps.lower() != "auto":
+        raise ValueError("patch_fps must be a number or 'auto'")
 
     fps_values: list[float] = []
     for song in songs:
@@ -85,6 +85,7 @@ def _build_epoch_segments(
     songs: list[SongRecord],
     seed: int,
     shuffle_segments_within_epoch: bool,
+    shuffle_segments_within_song: bool = True,
     sequence_mode: str,
     sequence_frames: int,
     stride_frames: int,
@@ -123,7 +124,7 @@ def _build_epoch_segments(
             stride_frames=stride_frames,
             rng=rng,
         )
-        if shuffle_segments_within_epoch and len(segment_ranges) > 1:
+        if shuffle_segments_within_song and len(segment_ranges) > 1:
             rng.shuffle(segment_ranges)
         for start, seg_len in segment_ranges:
             segments.append(

@@ -79,7 +79,7 @@ def test_compute_conditioning_counts_reduces_batch_histogram() -> None:
     accelerator = _FakeAccelerator()
     batch = {
         "conditioning_source": torch.tensor([0, 1, 2, 2, 0], dtype=torch.long),
-        "target_latent": torch.zeros(5, 1, 1, 1),
+        "target_signal": torch.zeros(5, 1, 1, 1),
     }
     stereo, mono, downmix = _compute_conditioning_counts(
         batch=batch,

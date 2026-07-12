@@ -17,8 +17,9 @@ except Exception:
 
 from .checkpointing import _save_checkpoint
 from .config import TrainConfig
-from .dataset import ConditioningSource, LatentSongDataset
+from .dataset import ConditioningSource, WaveformSongDataset
 from .ema import EMATeacher
+from .latent_dataset import LatentSongDataset
 from .sequence_plan import SequenceTrainingPlan
 from .trainer_metrics import (
     RunningLossState,
@@ -34,7 +35,7 @@ from .trainer_reporting import (
 )
 from .trainer_settings import TrainerRuntimeSettings
 from .trainer_step import _run_training_step
-from .validation import _run_generation_validation, _run_latent_validation
+from .validation import _run_generation_validation, _run_signal_validation
 
 
 @dataclass
@@ -46,6 +47,7 @@ class LatestAverages:
     avg_adv_loss: float | None = None
     avg_route_loss: float | None = None
     avg_corr_loss: float | None = None
+    avg_loss_terms: dict[str, float] | None = None
 
 
 def _create_progress_bar(
@@ -97,7 +99,7 @@ def _compute_conditioning_counts(
 ) -> tuple[int, int, int]:
     """Return reduced conditioning-source counts for reporting."""
     cond_counts = torch.bincount(
-        batch["conditioning_source"].detach().to(batch["target_latent"].device),
+        batch["conditioning_source"].detach().to(batch["target_signal"].device),
         minlength=3,
     ).to(dtype=torch.long)
     cond_counts = accelerator.reduce(cond_counts, reduction="sum")
@@ -114,7 +116,9 @@ def _should_run_validation(
     global_step: int,
 ) -> bool:
     """Return True when the current step matches validation cadence."""
-    return settings.validation_steps > 0 and global_step % settings.validation_steps == 0
+    return (
+        settings.validation_steps > 0 and global_step % settings.validation_steps == 0
+    )
 
 
 def _update_latest_averages(
@@ -125,6 +129,7 @@ def _update_latest_averages(
     avg_adv_loss: float | None,
     avg_route_loss: float | None,
     avg_corr_loss: float | None,
+    avg_loss_terms: dict[str, float],
 ) -> None:
     """Mutate latest average state from newly reduced values."""
     latest.avg_loss = avg_loss
@@ -136,6 +141,7 @@ def _update_latest_averages(
         latest.avg_route_loss = avg_route_loss
     if avg_corr_loss is not None:
         latest.avg_corr_loss = avg_corr_loss
+    latest.avg_loss_terms = dict(avg_loss_terms)
 
 
 def run_training_loop(
@@ -143,7 +149,7 @@ def run_training_loop(
     accelerator: Accelerator,
     config: TrainConfig,
     output_dir: Path,
-    dataset: LatentSongDataset,
+    dataset: WaveformSongDataset | LatentSongDataset,
     dataloader: DataLoader,
     validation_dataloader: DataLoader | None,
     model: torch.nn.Module,
@@ -171,6 +177,7 @@ def run_training_loop(
     resume_batches_seen = int(initial_resume_batches_seen)
 
     while global_step < config.training.max_steps:
+        dataset.set_global_step(global_step)
         dataset.set_epoch(epoch)
         total_batches_this_epoch = len(dataloader)
         if total_batches_this_epoch == 0:
@@ -201,6 +208,7 @@ def run_training_loop(
             )
 
         for batch in epoch_iterator:
+            dataset.set_global_step(global_step)
             batches_seen_in_epoch += 1
             if global_step >= config.training.max_steps:
                 break
@@ -226,7 +234,26 @@ def run_training_loop(
             loss_adv_step = step_result.loss_adv_step
             loss_route_step = step_result.loss_route_step
             loss_corr_step = step_result.loss_corr_step
+            loss_terms_step = step_result.loss_terms_step
             gan_lambda_adv_step = step_result.gan_lambda_adv_step
+
+            if step_result.skipped_step:
+                message = (
+                    "[skip_nonfinite] "
+                    f"epoch={epoch} "
+                    f"batch={batches_seen_in_epoch}/{total_batches_this_epoch} "
+                    f"reason={step_result.skip_reason} "
+                    f"loss={float(loss.detach().float().cpu().item())} "
+                    f"T_eff={t_eff} windows={num_windows}"
+                )
+                if step_result.grad_norm is not None:
+                    message += f" grad_norm={float(step_result.grad_norm.detach().float().cpu().item())}"
+                _log_main(
+                    accelerator=accelerator,
+                    progress_bar=progress_bar,
+                    message=message,
+                )
+                continue
 
             if accelerator.sync_gradients:
                 if ema_teacher is not None:
@@ -242,6 +269,7 @@ def run_training_loop(
                     loss_adv_step=loss_adv_step,
                     loss_route_step=loss_route_step,
                     loss_corr_step=loss_corr_step,
+                    loss_terms_step=loss_terms_step,
                 )
                 if progress_bar is not None:
                     step_loss_value = float(loss.detach().item())
@@ -257,11 +285,13 @@ def run_training_loop(
                             gan_lambda_adv_step=gan_lambda_adv_step,
                             loss_route_step=loss_route_step,
                             loss_corr_step=loss_corr_step,
+                            loss_terms_step=loss_terms_step,
                             latest_avg_loss=latest.avg_loss,
                             latest_avg_d_loss=latest.avg_d_loss,
                             latest_avg_adv_loss=latest.avg_adv_loss,
                             latest_avg_route_loss=latest.avg_route_loss,
                             latest_avg_corr_loss=latest.avg_corr_loss,
+                            latest_avg_loss_terms=latest.avg_loss_terms,
                         ),
                         refresh=False,
                     )
@@ -279,6 +309,7 @@ def run_training_loop(
                     avg_adv_loss = reduced_averages.avg_adv_loss
                     avg_route_loss = reduced_averages.avg_route_loss
                     avg_corr_loss = reduced_averages.avg_corr_loss
+                    avg_loss_terms = reduced_averages.avg_loss_terms
                     _update_latest_averages(
                         latest=latest,
                         avg_loss=avg_loss,
@@ -286,6 +317,7 @@ def run_training_loop(
                         avg_adv_loss=avg_adv_loss,
                         avg_route_loss=avg_route_loss,
                         avg_corr_loss=avg_corr_loss,
+                        avg_loss_terms=avg_loss_terms,
                     )
                     if progress_bar is not None:
                         progress_bar.set_postfix(
@@ -301,10 +333,12 @@ def run_training_loop(
                                 gan_lambda_adv_step=gan_lambda_adv_step,
                                 loss_route_step=loss_route_step,
                                 loss_corr_step=loss_corr_step,
+                                loss_terms_step=loss_terms_step,
                                 avg_d_loss=avg_d_loss,
                                 avg_adv_loss=avg_adv_loss,
                                 avg_route_loss=avg_route_loss,
                                 avg_corr_loss=avg_corr_loss,
+                                avg_loss_terms=avg_loss_terms,
                             ),
                             refresh=False,
                         )
@@ -332,8 +366,10 @@ def run_training_loop(
                         avg_adv_loss=avg_adv_loss,
                         loss_route_step=loss_route_step,
                         loss_corr_step=loss_corr_step,
+                        loss_terms_step=loss_terms_step,
                         avg_route_loss=avg_route_loss,
                         avg_corr_loss=avg_corr_loss,
+                        avg_loss_terms=avg_loss_terms,
                         cond_stereo=cond_stereo,
                         cond_mono=cond_mono,
                         cond_downmix=cond_downmix,
@@ -375,7 +411,7 @@ def run_training_loop(
                     and settings.run_validation
                     and validation_dataloader is not None
                 ):
-                    val_loss, val_batches = _run_latent_validation(
+                    val_loss, val_batches = _run_signal_validation(
                         accelerator=accelerator,
                         model=model,
                         dataloader=validation_dataloader,
@@ -409,6 +445,7 @@ def run_training_loop(
                                 model=model,
                                 config=config,
                                 global_step=global_step,
+                                ema_teacher=ema_teacher,
                             )
                         )
                         _log_main(

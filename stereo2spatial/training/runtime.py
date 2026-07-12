@@ -10,7 +10,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from .config import TrainConfig
-from .dataset import LatentSongDataset
+from .dataset import WaveformSongDataset
+from .latent_dataset import LatentSongDataset
+from .song_local_sampler import SongLocalBatchSampler
 
 try:
     _DATALOADER_INIT_PARAMS = set(inspect.signature(DataLoader.__init__).parameters)
@@ -59,7 +61,7 @@ def _disable_inductor_cudagraphs_if_possible() -> None:
 
 
 def _create_dataloader(
-    dataset: LatentSongDataset,
+    dataset: WaveformSongDataset | LatentSongDataset,
     config: TrainConfig,
     drop_last: bool | None = None,
     for_training: bool = False,
@@ -73,14 +75,27 @@ def _create_dataloader(
         # desync from sampler indices, causing IndexError near epoch boundaries.
         persistent_workers = False
     resolved_drop_last = config.data.drop_last if drop_last is None else bool(drop_last)
+    batch_mode = str(config.data.batch_mode).strip().lower()
     dataloader_kwargs: dict[str, Any] = {
-        "batch_size": config.data.batch_size,
-        "shuffle": False,
         "num_workers": num_workers,
         "pin_memory": config.data.pin_memory,
         "persistent_workers": persistent_workers,
-        "drop_last": resolved_drop_last,
     }
+    if batch_mode == "song_local":
+        dataloader_kwargs["batch_sampler"] = SongLocalBatchSampler(
+            dataset,
+            batch_size=config.data.batch_size,
+            num_workers=num_workers,
+            drop_last=resolved_drop_last,
+        )
+    else:
+        dataloader_kwargs.update(
+            {
+                "batch_size": config.data.batch_size,
+                "shuffle": False,
+                "drop_last": resolved_drop_last,
+            }
+        )
     if num_workers > 0:
         dataloader_kwargs["prefetch_factor"] = int(config.data.prefetch_factor)
         dataloader_kwargs["worker_init_fn"] = _worker_init_fn

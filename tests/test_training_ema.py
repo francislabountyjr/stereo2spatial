@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TypeVar, overload
+from typing import Any, TypeVar, cast, overload
 
 import torch
 
@@ -11,7 +11,18 @@ class _TinyModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.linear = torch.nn.Linear(2, 2, bias=False)
+        self.running_stat: torch.Tensor
         self.register_buffer("running_stat", torch.ones(1, dtype=torch.float32))
+
+
+class _RuntimeCacheModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(2, 2))
+        self.running_stat: torch.Tensor
+        self._runtime_cache: torch.Tensor
+        self.register_buffer("running_stat", torch.ones(1, dtype=torch.float32))
+        self.register_buffer("_runtime_cache", torch.empty(0), persistent=False)
 
 
 class _OrigModPrefixedStateDictModel(torch.nn.Module):
@@ -168,3 +179,16 @@ def test_ema_teacher_copy_from_accepts_orig_mod_prefixed_state_dict_keys() -> No
         assert torch.allclose(parameter, torch.full_like(parameter, 5.0))
     for buffer in ema_teacher.model.buffers():
         assert torch.allclose(buffer, torch.full_like(buffer, 5.0))
+
+
+def test_ema_teacher_update_ignores_nonpersistent_runtime_caches() -> None:
+    student = _RuntimeCacheModel()
+    ema_teacher = EMATeacher(model=student, decay=0.5)
+    student._runtime_cache = torch.ones(1024, 1024)
+    student.running_stat.fill_(3.0)
+
+    ema_teacher.update(student)
+
+    ema_model = cast(_RuntimeCacheModel, ema_teacher.model)
+    assert ema_model._runtime_cache.numel() == 0
+    assert torch.allclose(ema_model.running_stat, torch.tensor([3.0]))

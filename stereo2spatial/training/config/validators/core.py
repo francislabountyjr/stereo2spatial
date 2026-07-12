@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from stereo2spatial.modeling.factory import (
+    LEGACY_VAE_ARCHITECTURE,
+    resolve_model_architecture,
+)
+
 from ..types import TrainConfig
 from .common import require_non_negative, require_positive, require_probability
 
@@ -11,6 +16,11 @@ def validate_data_section(config: TrainConfig) -> None:
     require_positive(config.data.segment_seconds, "data.segment_seconds")
     require_positive(config.data.sequence_seconds, "data.sequence_seconds")
     require_positive(config.data.stride_seconds, "data.stride_seconds")
+    require_positive(config.data.sample_rate, "data.sample_rate")
+    if config.data.training_sample_rate is not None:
+        require_positive(config.data.training_sample_rate, "data.training_sample_rate")
+        if int(config.data.training_sample_rate) > int(config.data.sample_rate):
+            raise ValueError("data.training_sample_rate must be <= data.sample_rate")
     require_non_negative(config.data.cache_size, "data.cache_size")
     require_positive(config.data.batch_size, "data.batch_size")
     require_non_negative(config.data.num_workers, "data.num_workers")
@@ -25,31 +35,273 @@ def validate_data_section(config: TrainConfig) -> None:
             "data.mono_probability + data.downmix_probability must be <= 1"
         )
 
-    if isinstance(config.data.latent_fps, str):
-        if config.data.latent_fps.lower() != "auto":
-            raise ValueError("data.latent_fps must be a number or 'auto'")
-    else:
-        require_positive(float(config.data.latent_fps), "data.latent_fps")
-
     artifact_mode = config.data.sample_artifact_mode.lower()
-    if artifact_mode not in {"bundle", "split"}:
-        raise ValueError("data.sample_artifact_mode must be one of: bundle, split")
+    if artifact_mode not in {"bundle", "split", "flac"}:
+        raise ValueError(
+            "data.sample_artifact_mode must be one of: bundle, split, flac"
+        )
+    architecture = resolve_model_architecture(config.model)
+    if architecture == LEGACY_VAE_ARCHITECTURE:
+        if artifact_mode == "flac":
+            raise ValueError(
+                "model.architecture=legacy_vae training requires precomputed "
+                "latent artifacts (data.sample_artifact_mode bundle or split)"
+            )
+        latent_fps = config.data.latent_fps
+        if isinstance(latent_fps, str):
+            if latent_fps.strip().lower() != "auto":
+                raise ValueError("data.latent_fps must be a number or 'auto'")
+        else:
+            require_positive(latent_fps, "data.latent_fps")
+        waveform_only_data_features = {
+            "data.amplitude_lift_enabled": config.data.amplitude_lift_enabled,
+            "data.source_resample_augmentation.enabled": (
+                config.data.source_resample_aug_enabled
+            ),
+            "data.source_codec_augmentation.enabled": (
+                config.data.source_codec_aug_enabled
+            ),
+        }
+        enabled = [name for name, value in waveform_only_data_features.items() if value]
+        if enabled:
+            raise ValueError(
+                "legacy_vae latent training does not support waveform-only data "
+                "transforms: " + ", ".join(enabled)
+            )
+    batch_mode = str(config.data.batch_mode).strip().lower()
+    if batch_mode not in {"standard", "song_local"}:
+        raise ValueError("data.batch_mode must be one of: standard, song_local")
+
+    lift_reference = str(config.data.amplitude_lift_reference).strip().lower()
+    if lift_reference not in {"source", "target"}:
+        raise ValueError("data.amplitude_lift_reference must be one of: source, target")
+    lift_mode = str(config.data.amplitude_lift_mode).strip().lower()
+    if lift_mode not in {"rms", "scale", "wavflow"}:
+        raise ValueError("data.amplitude_lift_mode must be one of: rms, scale, wavflow")
+    require_positive(
+        config.data.amplitude_lift_target_rms, "data.amplitude_lift_target_rms"
+    )
+    require_positive(config.data.amplitude_lift_scale, "data.amplitude_lift_scale")
+    if config.data.amplitude_lift_clip_value is not None:
+        require_positive(
+            config.data.amplitude_lift_clip_value,
+            "data.amplitude_lift_clip_value",
+        )
+    require_positive(config.data.amplitude_lift_eps, "data.amplitude_lift_eps")
+    gain_power = float(getattr(config.data, "amplitude_lift_gain_power", 1.0))
+    if not (0.0 <= gain_power <= 1.0):
+        raise ValueError("data.amplitude_lift_gain_power must be in [0.0, 1.0]")
+    gain_min_value = getattr(config.data, "amplitude_lift_gain_min_value", None)
+    if gain_min_value is not None and float(gain_min_value) <= 0.0:
+        raise ValueError("data.amplitude_lift_gain_min_value must be > 0 when set")
+    require_positive(
+        getattr(config.data, "amplitude_lift_peak_limit", 1.0),
+        "data.amplitude_lift_peak_limit",
+    )
+    require_positive(
+        getattr(config.data, "amplitude_lift_peak_rescale_min_rms", 0.3),
+        "data.amplitude_lift_peak_rescale_min_rms",
+    )
+    min_source_rms = getattr(config.data, "min_source_rms", None)
+    if min_source_rms is not None and not (0.0 < float(min_source_rms) < 1.0):
+        raise ValueError("data.min_source_rms must be in (0, 1) when set")
+    if bool(getattr(config.model, "amplitude_gain_conditioning", False)):
+        if not bool(getattr(config.data, "amplitude_lift_enabled", False)):
+            raise ValueError(
+                "model.amplitude_gain_conditioning requires "
+                "data.amplitude_lift_enabled=true"
+            )
+
+    require_probability(
+        config.data.source_resample_aug_probability,
+        "data.source_resample_augmentation.probability",
+    )
+    rates = config.data.source_resample_aug_rates
+    weights = config.data.source_resample_aug_weights
+    if config.data.source_resample_aug_enabled:
+        if not rates:
+            raise ValueError(
+                "data.source_resample_augmentation.rates must be non-empty "
+                "when source resample augmentation is enabled"
+            )
+        for index, rate in enumerate(rates):
+            require_positive(rate, f"data.source_resample_augmentation.rates[{index}]")
+    if weights is not None:
+        if not rates:
+            raise ValueError("data.source_resample_augmentation.weights requires rates")
+        if len(weights) != len(rates):
+            raise ValueError(
+                "data.source_resample_augmentation.weights must match rates length"
+            )
+        if sum(float(item) for item in weights) <= 0:
+            raise ValueError(
+                "data.source_resample_augmentation.weights must sum to > 0"
+            )
+        for index, weight in enumerate(weights):
+            require_non_negative(
+                weight, f"data.source_resample_augmentation.weights[{index}]"
+            )
+
+    require_probability(
+        config.data.source_codec_aug_probability,
+        "data.source_codec_augmentation.probability",
+    )
+    require_non_negative(
+        config.data.source_codec_aug_start_step,
+        "data.source_codec_augmentation.start_step",
+    )
+    require_non_negative(
+        config.data.source_codec_aug_full_strength_step,
+        "data.source_codec_augmentation.full_strength_step",
+    )
+    backend = str(config.data.source_codec_aug_backend).strip().lower()
+    if backend not in {"auto", "torchaudio", "ffmpeg"}:
+        raise ValueError(
+            "data.source_codec_augmentation.backend must be one of: "
+            "auto, torchaudio, ffmpeg"
+        )
+    require_positive(
+        config.data.source_codec_aug_align_max_lag,
+        "data.source_codec_augmentation.align_max_lag",
+    )
+    require_positive(
+        config.data.source_codec_aug_timeout_seconds,
+        "data.source_codec_augmentation.timeout_seconds",
+    )
+    if config.data.source_codec_aug_max_chunk_seconds is not None:
+        require_positive(
+            config.data.source_codec_aug_max_chunk_seconds,
+            "data.source_codec_augmentation.max_chunk_seconds",
+        )
+    codec_names = config.data.source_codec_aug_codecs
+    codec_weights = config.data.source_codec_aug_codec_weights
+    codec_bitrates = config.data.source_codec_aug_bitrates
+    if config.data.source_codec_aug_enabled:
+        if not codec_names:
+            raise ValueError(
+                "data.source_codec_augmentation.codecs must be non-empty when enabled"
+            )
+        if codec_weights is None or len(codec_weights) != len(codec_names):
+            raise ValueError(
+                "data.source_codec_augmentation codec weights must match codecs"
+            )
+        if codec_bitrates is None:
+            raise ValueError("data.source_codec_augmentation bitrates are required")
+        if sum(float(item) for item in codec_weights) <= 0:
+            raise ValueError(
+                "data.source_codec_augmentation codec weights must sum to > 0"
+            )
+        for index, codec_name in enumerate(codec_names):
+            normalized_codec = str(codec_name).strip().lower()
+            if normalized_codec not in {"mp3", "aac", "opus"}:
+                raise ValueError(
+                    "data.source_codec_augmentation codecs must be one of: "
+                    "mp3, aac, opus"
+                )
+            require_non_negative(
+                codec_weights[index],
+                f"data.source_codec_augmentation.codecs.{normalized_codec}.weight",
+            )
+            bitrates = codec_bitrates.get(normalized_codec)
+            if not bitrates:
+                raise ValueError(
+                    "data.source_codec_augmentation codec bitrates must be non-empty"
+                )
+            for bitrate_index, bitrate in enumerate(bitrates):
+                require_positive(
+                    bitrate,
+                    "data.source_codec_augmentation."
+                    f"codecs.{normalized_codec}.bitrates[{bitrate_index}]",
+                )
 
 
 def validate_model_section(config: TrainConfig) -> None:
     """Validate model architecture hyperparameter bounds and assumptions."""
-    if config.model.cond_channels != 1:
+    architecture = resolve_model_architecture(config.model)
+    if config.model.cond_channels not in {1, 2}:
         raise ValueError(
-            "This training stack expects model.cond_channels == 1 "
-            "for current stereo latent conditioning."
+            "Training expects model.cond_channels to be 1 or 2 for mono/stereo "
+            "conditioning."
         )
     require_positive(config.model.target_channels, "model.target_channels")
-    require_positive(config.model.latent_dim, "model.latent_dim")
+    require_positive(config.model.patch_size, "model.patch_size")
+    if architecture == LEGACY_VAE_ARCHITECTURE:
+        if config.model.latent_dim is None:
+            raise ValueError("model.latent_dim is required for legacy_vae")
+        require_positive(config.model.latent_dim, "model.latent_dim")
+        if int(config.model.patch_size) != int(config.model.latent_dim):
+            raise ValueError(
+                "legacy_vae model.patch_size runtime alias must equal model.latent_dim"
+            )
+        if config.model.mix_style_dim != 0:
+            raise ValueError("legacy_vae architecture requires model.mix_style_dim=0")
+        if config.model.amplitude_gain_conditioning:
+            raise ValueError(
+                "legacy_vae architecture does not support amplitude gain conditioning"
+            )
+        if config.model.waveform_level_depth != 0:
+            raise ValueError(
+                "legacy_vae architecture requires model.waveform_level_depth=0"
+            )
     require_positive(config.model.hidden_dim, "model.hidden_dim")
     require_positive(config.model.num_layers, "model.num_layers")
     require_positive(config.model.num_heads, "model.num_heads")
+    if config.model.hidden_dim % config.model.num_heads != 0:
+        raise ValueError("model.hidden_dim must be divisible by model.num_heads")
     require_positive(config.model.timestep_embed_dim, "model.timestep_embed_dim")
     require_positive(config.model.timestep_scale, "model.timestep_scale")
     if config.model.max_period <= 1:
         raise ValueError("model.max_period must be > 1")
     require_non_negative(config.model.num_memory_tokens, "model.num_memory_tokens")
+    require_non_negative(config.model.mix_style_dim, "model.mix_style_dim")
+    require_non_negative(
+        config.model.waveform_level_depth, "model.waveform_level_depth"
+    )
+    require_positive(
+        config.model.waveform_micro_patch_size,
+        "model.waveform_micro_patch_size",
+    )
+    require_positive(config.model.waveform_hidden_dim, "model.waveform_hidden_dim")
+    require_positive(config.model.waveform_mlp_ratio, "model.waveform_mlp_ratio")
+    require_positive(
+        config.model.final_output_kernel_size,
+        "model.final_output_kernel_size",
+    )
+    if config.model.final_output_kernel_size % 2 == 0:
+        raise ValueError("model.final_output_kernel_size must be odd")
+    if architecture != LEGACY_VAE_ARCHITECTURE and config.model.rope_enabled:
+        require_positive(config.model.rope_theta, "model.rope_theta")
+        if config.model.rope_theta <= 1:
+            raise ValueError("model.rope_theta must be > 1")
+        if (config.model.hidden_dim // config.model.num_heads) % 2 != 0:
+            raise ValueError(
+                "model.hidden_dim / model.num_heads must be even when RoPE is enabled"
+            )
+    waveform_num_heads = (
+        config.model.num_heads
+        if config.model.waveform_num_heads is None
+        else int(config.model.waveform_num_heads)
+    )
+    require_positive(waveform_num_heads, "model.waveform_num_heads")
+    if (
+        architecture != LEGACY_VAE_ARCHITECTURE
+        and config.model.waveform_level_depth > 0
+    ):
+        if config.model.patch_size % config.model.waveform_micro_patch_size != 0:
+            raise ValueError(
+                "model.patch_size must be divisible by "
+                "model.waveform_micro_patch_size when waveform_level_depth > 0"
+            )
+        if config.model.hidden_dim % waveform_num_heads != 0:
+            raise ValueError(
+                "model.hidden_dim must be divisible by model.waveform_num_heads "
+                "when waveform_level_depth > 0"
+            )
+        if (
+            config.model.rope_enabled
+            and (config.model.hidden_dim // waveform_num_heads) % 2 != 0
+        ):
+            raise ValueError(
+                "model.hidden_dim / model.waveform_num_heads must be even "
+                "when waveform_level_depth > 0 and RoPE is enabled"
+            )

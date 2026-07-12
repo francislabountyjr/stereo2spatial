@@ -164,9 +164,20 @@ def train(
         model=built_model,
     )
     if init_checkpoint_path is not None:
-        _load_model_weights_only(model=model, checkpoint_path=init_checkpoint_path)
+        init_weights_source = _load_model_weights_only(
+            model=model,
+            checkpoint_path=init_checkpoint_path,
+            weights_source=getattr(
+                config.training,
+                "init_from_checkpoint_weights_source",
+                "student",
+            ),
+        )
         if accelerator.is_main_process:
-            print(f"Initialized model weights from checkpoint: {init_checkpoint_path}")
+            print(
+                "Initialized model weights from checkpoint: "
+                f"{init_checkpoint_path} weights_source={init_weights_source}"
+            )
         if ema_teacher is not None:
             ema_teacher.copy_from(model)
 

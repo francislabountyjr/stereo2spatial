@@ -161,7 +161,7 @@ class EncoderBlock(nn.Module):
                 bias=bias,
             ),
         )
-        
+
     def forward(self, x):
         return self.layers(x)
 

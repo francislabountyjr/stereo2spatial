@@ -9,7 +9,6 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from stereo2spatial.inference.export_bundle import (  # noqa: E402
-    DEFAULT_CHANNEL_ORDER_7_1_4,
     export_model_bundle,
 )
 
@@ -36,6 +35,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "Optional resolved JSON or training YAML config. Defaults to "
+            "<train-run-dir>/resolved_config.json."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         required=True,
@@ -49,47 +57,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--channel-layout-name",
-        default="7.1.4",
-        help="Human-readable output layout name for bundle metadata.",
+        default=None,
+        help=(
+            "Human-readable output layout name for bundle metadata. Defaults from "
+            "the target channel count: 2=binaural, 6=5.1 rear, 12=7.1.4."
+        ),
     )
     parser.add_argument(
         "--channel-order",
         nargs="+",
-        default=DEFAULT_CHANNEL_ORDER_7_1_4,
+        default=None,
         help="Ordered channel labels for the exported multichannel waveform layout.",
     )
     parser.add_argument(
         "--sample-rate",
         type=int,
-        default=48000,
-        help="Nominal audio sample rate recorded in the bundle metadata.",
-    )
-    parser.add_argument(
-        "--vae-checkpoint-path",
-        type=Path,
-        default=None,
-        help="Optional EAR-VAE checkpoint to copy into the bundle.",
-    )
-    parser.add_argument(
-        "--vae-config-path",
-        type=Path,
-        default=None,
-        help="Optional EAR-VAE config JSON to copy into the bundle.",
-    )
-    parser.add_argument(
-        "--ear-vae-root",
-        type=Path,
         default=None,
         help=(
-            "Optional EAR_VAE repo root used to resolve bundled EAR-VAE assets when "
-            "--vae-checkpoint-path/--vae-config-path are not provided."
+            "Recommended inference sample rate. Defaults to data.training_sample_rate "
+            "when set, otherwise data.sample_rate. Legacy EAR-VAE bundles are fixed "
+            "at 48000 Hz."
         ),
     )
     parser.add_argument(
-        "--exclude-vae",
-        action="store_true",
-        help="Do not bundle EAR-VAE assets.",
+        "--include-vae",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Bundle EAR-VAE assets. Defaults to true for legacy_vae and false "
+            "for waveform models."
+        ),
     )
+    parser.add_argument("--vae-checkpoint-path", type=Path, default=None)
+    parser.add_argument("--vae-config-path", type=Path, default=None)
     return parser
 
 
@@ -101,12 +101,14 @@ def main() -> None:
         output_dir=args.output_dir,
         weights_source=args.weights_source,
         channel_layout_name=args.channel_layout_name,
-        channel_order=list(args.channel_order),
+        channel_order=(
+            list(args.channel_order) if args.channel_order is not None else None
+        ),
         sample_rate=args.sample_rate,
-        include_vae=not args.exclude_vae,
-        ear_vae_root=args.ear_vae_root,
+        include_vae=args.include_vae,
         vae_checkpoint_path=args.vae_checkpoint_path,
         vae_config_path=args.vae_config_path,
+        config_path=args.config,
     )
 
     print("Export complete:")

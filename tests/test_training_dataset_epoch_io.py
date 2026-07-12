@@ -1,22 +1,29 @@
 from __future__ import annotations
 
+import json
 import random
 from pathlib import Path
 
 import pytest
+import soundfile as sf
 import torch
 
+from stereo2spatial.training.dataset import WaveformSongDataset
 from stereo2spatial.training.dataset_epoch import (
     _build_epoch_segments,
-    _resolve_latent_fps,
+    _resolve_patch_fps,
     _segments_for_song,
 )
 from stereo2spatial.training.dataset_io import (
     SAMPLE_BUNDLE_FILENAME,
-    SOURCE_MONO_LATENT_FILENAME,
-    SOURCE_STEREO_LATENT_FILENAME,
-    TARGET_LATENT_FILENAME,
-    _load_latents_from_sample,
+    SOURCE_STEREO_SIGNAL_FILENAME,
+    SOURCE_STEREO_SIGNAL_FLAC_FILENAME,
+    TARGET_SIGNAL_FILENAME,
+    TARGET_SIGNAL_FLAC_FILENAME,
+    _filter_songs_by_min_source_rms,
+    _filter_songs_by_sample_exclusion,
+    _load_manifest_records,
+    _load_signals_from_sample,
     _slice_with_right_pad,
 )
 from stereo2spatial.training.dataset_types import ConditioningSource, SongRecord
@@ -39,10 +46,10 @@ def _song(
 
 
 def test_slice_with_right_pad_zero_pads_tail_and_sets_mask() -> None:
-    latent = torch.arange(6, dtype=torch.float32).view(1, 1, 6)
+    signal = torch.arange(6, dtype=torch.float32).view(1, 1, 6)
 
     chunk, valid_mask = _slice_with_right_pad(
-        latent_cdt=latent,
+        signal_cdt=signal,
         start_frame=4,
         num_valid_frames=2,
         window_frames=4,
@@ -55,65 +62,459 @@ def test_slice_with_right_pad_zero_pads_tail_and_sets_mask() -> None:
 
 
 def test_slice_with_right_pad_rejects_invalid_num_valid_frames() -> None:
-    latent = torch.zeros(1, 1, 4)
+    signal = torch.zeros(1, 1, 4)
 
     with pytest.raises(ValueError, match="must be > 0"):
-        _slice_with_right_pad(latent, start_frame=0, num_valid_frames=0, window_frames=4)
+        _slice_with_right_pad(
+            signal, start_frame=0, num_valid_frames=0, window_frames=4
+        )
 
     with pytest.raises(ValueError, match="cannot exceed window_frames"):
-        _slice_with_right_pad(latent, start_frame=0, num_valid_frames=5, window_frames=4)
+        _slice_with_right_pad(
+            signal, start_frame=0, num_valid_frames=5, window_frames=4
+        )
 
 
-def test_load_latents_from_sample_bundle_normalizes_dtype_and_rank(
+def test_load_signals_from_sample_bundle_normalizes_dtype_and_rank(
     tmp_path: Path,
 ) -> None:
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir(parents=True)
     torch.save(
         {
-            "target_latent": torch.ones(3, 5, dtype=torch.float64),
-            "source_stereo_latent": torch.ones(2, 3, 5, dtype=torch.float16),
-            "source_mono_latent": torch.ones(3, 5, dtype=torch.float64),
-            "source_downmix_latent": torch.ones(1, 3, 5, dtype=torch.float32),
+            "target_signal": torch.ones(3, 5, dtype=torch.float64),
+            "source_stereo_signal": torch.ones(2, 3, 5, dtype=torch.float16),
+            "source_mono_signal": torch.ones(3, 5, dtype=torch.float64),
+            "source_downmix_signal": torch.ones(1, 3, 5, dtype=torch.float32),
         },
         sample_dir / SAMPLE_BUNDLE_FILENAME,
     )
 
-    latents = _load_latents_from_sample(sample_dir)
+    signals = _load_signals_from_sample(sample_dir, patch_size=4)
 
-    assert latents["target_latent"].shape == (1, 3, 5)
-    assert latents["source_stereo_latent"].shape == (2, 3, 5)
-    assert latents["source_mono_latent"].shape == (1, 3, 5)
-    assert latents["source_downmix_latent"].shape == (1, 3, 5)
-    assert all(tensor.dtype == torch.float32 for tensor in latents.values())
-    assert all(tensor.is_contiguous() for tensor in latents.values())
+    assert signals["target_signal"].shape == (3, 4, 2)
+    assert signals["source_stereo_signal"].shape == (2, 3, 5)
+    assert signals["source_mono_signal"].shape == (3, 4, 2)
+    assert signals["source_downmix_signal"].shape == (1, 3, 5)
+    assert all(tensor.dtype == torch.float32 for tensor in signals.values())
+    assert all(tensor.is_contiguous() for tensor in signals.values())
 
 
-def test_load_latents_from_sample_split_requires_all_artifacts(tmp_path: Path) -> None:
+def test_load_signals_from_sample_bundle_allows_missing_downmix(
+    tmp_path: Path,
+) -> None:
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir(parents=True)
-    torch.save(torch.zeros(3, 5), sample_dir / TARGET_LATENT_FILENAME)
-    torch.save(torch.zeros(3, 5), sample_dir / SOURCE_STEREO_LATENT_FILENAME)
-    torch.save(torch.zeros(3, 5), sample_dir / SOURCE_MONO_LATENT_FILENAME)
-    # Intentionally omit SOURCE_DOWNMIX_LATENT_FILENAME.
+    torch.save(
+        {
+            "target_signal": torch.ones(2, 8),
+            "source_stereo_signal": torch.ones(2, 8),
+            "source_mono_signal": torch.ones(2, 8),
+        },
+        sample_dir / SAMPLE_BUNDLE_FILENAME,
+    )
 
-    with pytest.raises(FileNotFoundError, match="Missing latent artifacts"):
-        _load_latents_from_sample(sample_dir)
+    signals = _load_signals_from_sample(sample_dir, patch_size=4)
+
+    assert set(signals) == {
+        "target_signal",
+        "source_stereo_signal",
+        "source_mono_signal",
+    }
 
 
-def test_resolve_latent_fps_auto_uses_median_and_falls_back_to_default() -> None:
+def test_load_signals_from_sample_bundle_allows_missing_mono_and_downmix(
+    tmp_path: Path,
+) -> None:
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir(parents=True)
+    torch.save(
+        {
+            "target_signal": torch.ones(2, 8),
+            "source_stereo_signal": torch.ones(2, 8),
+        },
+        sample_dir / SAMPLE_BUNDLE_FILENAME,
+    )
+
+    signals = _load_signals_from_sample(sample_dir, patch_size=4)
+
+    assert set(signals) == {"target_signal", "source_stereo_signal"}
+
+
+def test_load_signals_from_sample_flac_artifacts(tmp_path: Path) -> None:
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir(parents=True)
+    target = torch.linspace(-0.5, 0.5, 16, dtype=torch.float32).view(2, 8)
+    source = torch.linspace(0.5, -0.5, 16, dtype=torch.float32).view(2, 8)
+    sf.write(
+        str(sample_dir / TARGET_SIGNAL_FLAC_FILENAME),
+        target.t().numpy(),
+        48_000,
+        format="FLAC",
+        subtype="PCM_24",
+    )
+    sf.write(
+        str(sample_dir / SOURCE_STEREO_SIGNAL_FLAC_FILENAME),
+        source.t().numpy(),
+        48_000,
+        format="FLAC",
+        subtype="PCM_24",
+    )
+
+    signals = _load_signals_from_sample(sample_dir, patch_size=4)
+
+    assert set(signals) == {"target_signal", "source_stereo_signal"}
+    assert signals["target_signal"].shape == (2, 4, 2)
+    assert signals["source_stereo_signal"].shape == (2, 4, 2)
+
+
+def test_load_signals_from_sample_applies_shared_source_amplitude_lift(
+    tmp_path: Path,
+) -> None:
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir(parents=True)
+    torch.save(
+        {
+            "target_signal": torch.full((2, 8), 0.5),
+            "source_stereo_signal": torch.ones(2, 8),
+        },
+        sample_dir / SAMPLE_BUNDLE_FILENAME,
+    )
+
+    signals = _load_signals_from_sample(
+        sample_dir,
+        patch_size=4,
+        amplitude_lift_enabled=True,
+        amplitude_lift_reference="source",
+        amplitude_lift_target_rms=0.33,
+        amplitude_lift_scale=3.0,
+    )
+
+    assert signals["source_stereo_signal"].shape == (2, 4, 2)
+    assert torch.allclose(
+        signals["source_stereo_signal"],
+        torch.full((2, 4, 2), 0.99),
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        signals["target_signal"],
+        torch.full((2, 4, 2), 0.495),
+        atol=1e-6,
+    )
+
+
+def test_load_signals_from_sample_uses_configured_amplitude_lift_clip(
+    tmp_path: Path,
+) -> None:
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir(parents=True)
+    torch.save(
+        {
+            "target_signal": torch.full((2, 8), 5.0),
+            "source_stereo_signal": torch.ones(2, 8),
+        },
+        sample_dir / SAMPLE_BUNDLE_FILENAME,
+    )
+
+    signals = _load_signals_from_sample(
+        sample_dir,
+        patch_size=4,
+        amplitude_lift_enabled=True,
+        amplitude_lift_reference="source",
+        amplitude_lift_target_rms=0.33,
+        amplitude_lift_scale=3.0,
+        amplitude_lift_clip_value=4.0,
+    )
+
+    assert torch.allclose(
+        signals["target_signal"],
+        torch.full((2, 4, 2), 4.95),
+        atol=1e-6,
+    )
+
+
+def test_load_signals_from_sample_allows_unclipped_amplitude_lift(
+    tmp_path: Path,
+) -> None:
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir(parents=True)
+    torch.save(
+        {
+            "target_signal": torch.full((2, 8), 20.0),
+            "source_stereo_signal": torch.ones(2, 8),
+        },
+        sample_dir / SAMPLE_BUNDLE_FILENAME,
+    )
+
+    signals = _load_signals_from_sample(
+        sample_dir,
+        patch_size=4,
+        amplitude_lift_enabled=True,
+        amplitude_lift_reference="source",
+        amplitude_lift_target_rms=0.33,
+        amplitude_lift_scale=3.0,
+        amplitude_lift_clip_value=None,
+    )
+
+    assert torch.allclose(
+        signals["target_signal"],
+        torch.full((2, 4, 2), 19.8),
+        atol=1e-6,
+    )
+
+
+def test_load_signals_from_sample_supports_scale_only_amplitude_lift(
+    tmp_path: Path,
+) -> None:
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir(parents=True)
+    torch.save(
+        {
+            "target_signal": torch.full((2, 8), 0.5),
+            "source_stereo_signal": torch.full((2, 8), 0.25),
+        },
+        sample_dir / SAMPLE_BUNDLE_FILENAME,
+    )
+
+    signals = _load_signals_from_sample(
+        sample_dir,
+        patch_size=4,
+        amplitude_lift_enabled=True,
+        amplitude_lift_mode="scale",
+        amplitude_lift_scale=3.0,
+        amplitude_lift_clip_value=0.1,
+    )
+
+    assert torch.allclose(
+        signals["source_stereo_signal"],
+        torch.full((2, 4, 2), 0.75),
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        signals["target_signal"],
+        torch.full((2, 4, 2), 1.5),
+        atol=1e-6,
+    )
+
+
+def test_load_signals_from_sample_supports_wavflow_independent_lift(
+    tmp_path: Path,
+) -> None:
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir(parents=True)
+    torch.save(
+        {
+            "target_signal": torch.full((2, 8), 0.5),
+            "source_stereo_signal": torch.full((2, 8), 0.25),
+        },
+        sample_dir / SAMPLE_BUNDLE_FILENAME,
+    )
+
+    signals = _load_signals_from_sample(
+        sample_dir,
+        patch_size=4,
+        amplitude_lift_enabled=True,
+        amplitude_lift_mode="wavflow",
+        amplitude_lift_target_rms=0.33,
+        amplitude_lift_scale=3.0,
+    )
+
+    assert torch.allclose(
+        signals["target_signal"],
+        torch.full((2, 4, 2), 0.99),
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        signals["source_stereo_signal"],
+        torch.full((2, 4, 2), 0.99),
+        atol=1e-6,
+    )
+
+
+def test_load_signals_from_sample_can_disable_wavflow_target_clamp(
+    tmp_path: Path,
+) -> None:
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir(parents=True)
+    target = torch.zeros(1, 16)
+    target[0, 0] = 1.0
+    torch.save(
+        {
+            "target_signal": target,
+            "source_stereo_signal": torch.full((2, 16), 0.25),
+        },
+        sample_dir / SAMPLE_BUNDLE_FILENAME,
+    )
+
+    clamped = _load_signals_from_sample(
+        sample_dir,
+        patch_size=4,
+        amplitude_lift_enabled=True,
+        amplitude_lift_mode="wavflow",
+        amplitude_lift_target_rms=0.33,
+        amplitude_lift_scale=3.0,
+        amplitude_lift_waveform_clamp=True,
+    )
+    unclamped = _load_signals_from_sample(
+        sample_dir,
+        patch_size=4,
+        amplitude_lift_enabled=True,
+        amplitude_lift_mode="wavflow",
+        amplitude_lift_target_rms=0.33,
+        amplitude_lift_scale=3.0,
+        amplitude_lift_waveform_clamp=False,
+    )
+
+    assert float(clamped["target_signal"].amax().item()) == pytest.approx(3.0)
+    assert float(unclamped["target_signal"].amax().item()) == pytest.approx(3.96)
+
+
+def test_waveform_dataset_uses_stored_signal_rms_for_chunk_lift(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    sample_dir = dataset_root / "samples" / "a"
+    sample_dir.mkdir(parents=True)
+    torch.save(
+        {
+            "target_signal": torch.ones(2, 8),
+            "source_stereo_signal": torch.full((2, 8), 2.0),
+        },
+        sample_dir / SAMPLE_BUNDLE_FILENAME,
+    )
+    (sample_dir / "metadata.json").write_text(
+        '{"sample_rate": 48000, "input_samples": 8, '
+        '"signal_rms": {"source_stereo_signal": 1.0, "target_signal": 1.0}}',
+        encoding="utf-8",
+    )
+    manifest_path = dataset_root / "manifest.jsonl"
+    manifest_path.write_text(
+        '{"stream_hash": "a", "sample_dir": "samples/a", '
+        '"target_signal_shape": [2, 8], '
+        '"signal_rms": {"source_stereo_signal": 1.0, "target_signal": 1.0}}\n',
+        encoding="utf-8",
+    )
+
+    dataset = WaveformSongDataset(
+        dataset_root=dataset_root,
+        manifest_path=manifest_path,
+        sample_artifact_mode="bundle",
+        segment_seconds=1.0,
+        patch_fps=2.0,
+        patch_size=4,
+        mono_probability=0.0,
+        downmix_probability=0.0,
+        cache_size=0,
+        shuffle_segments_within_epoch=False,
+        seed=0,
+        sequence_seconds=1.0,
+        stride_seconds=1.0,
+        amplitude_lift_enabled=True,
+        amplitude_lift_reference="source",
+        amplitude_lift_target_rms=0.33,
+        amplitude_lift_scale=3.0,
+    )
+
+    sample = dataset[0]
+
+    assert torch.allclose(sample["target_signal"], torch.full((2, 4, 2), 0.99))
+    assert torch.allclose(sample["cond_signal"], torch.full((2, 4, 2), 1.98))
+
+
+def test_waveform_dataset_training_sample_rate_downsamples_full_song(
+    tmp_path: Path,
+) -> None:
+    torchaudio = pytest.importorskip("torchaudio")
+    del torchaudio
+    dataset_root = tmp_path / "dataset"
+    sample_dir = dataset_root / "samples" / "a"
+    sample_dir.mkdir(parents=True)
+    source = torch.stack(
+        [
+            torch.linspace(-1.0, 1.0, 8),
+            torch.linspace(1.0, -1.0, 8),
+        ],
+        dim=0,
+    )
+    torch.save(
+        {
+            "target_signal": source.clone(),
+            "source_stereo_signal": source.clone(),
+        },
+        sample_dir / SAMPLE_BUNDLE_FILENAME,
+    )
+    (sample_dir / "metadata.json").write_text(
+        '{"sample_rate": 8, "input_samples": 8}',
+        encoding="utf-8",
+    )
+    manifest_path = dataset_root / "manifest.jsonl"
+    manifest_path.write_text(
+        '{"stream_hash": "a", "sample_dir": "samples/a", '
+        '"target_signal_shape": [2, 8]}\n',
+        encoding="utf-8",
+    )
+
+    dataset = WaveformSongDataset(
+        dataset_root=dataset_root,
+        manifest_path=manifest_path,
+        sample_artifact_mode="bundle",
+        segment_seconds=1.0,
+        patch_fps=2.0,
+        patch_size=2,
+        mono_probability=0.0,
+        downmix_probability=0.0,
+        cache_size=0,
+        shuffle_segments_within_epoch=False,
+        seed=0,
+        sequence_seconds=1.0,
+        stride_seconds=1.0,
+        sample_rate=8,
+        training_sample_rate=4,
+    )
+
+    sample = dataset[0]
+
+    assert dataset.resolved_patch_fps == pytest.approx(2.0)
+    assert dataset._songs[0].target_frames == 2
+    assert sample["target_signal"].shape == (2, 2, 2)
+    assert sample["cond_signal"].shape == (2, 2, 2)
+    assert sample["valid_mask"].tolist() == [True, True]
+
+
+def test_waveform_dataset_materializes_cached_signal_storage() -> None:
+    original = torch.arange(8, dtype=torch.float32).view(2, 4)
+
+    materialized = WaveformSongDataset._materialize_signals({"target_signal": original})
+
+    assert torch.allclose(materialized["target_signal"], original)
+    assert materialized["target_signal"].data_ptr() != original.data_ptr()
+    assert materialized["target_signal"].is_contiguous()
+
+
+def test_load_signals_from_sample_split_allows_missing_mono_and_downmix(
+    tmp_path: Path,
+) -> None:
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir(parents=True)
+    torch.save(torch.zeros(3, 5), sample_dir / TARGET_SIGNAL_FILENAME)
+    torch.save(torch.zeros(3, 5), sample_dir / SOURCE_STEREO_SIGNAL_FILENAME)
+
+    signals = _load_signals_from_sample(sample_dir, patch_size=4)
+
+    assert set(signals) == {"target_signal", "source_stereo_signal"}
+
+
+def test_resolve_patch_fps_auto_uses_median_and_falls_back_to_default() -> None:
     songs = [
         _song(target_frames=100, sample_rate=48_000, input_samples=96_000),  # 50
         _song(target_frames=80, sample_rate=44_100, input_samples=88_200),  # 40
         _song(target_frames=120, sample_rate=48_000, input_samples=96_000),  # 60
     ]
-    assert _resolve_latent_fps("auto", songs) == pytest.approx(50.0)
+    assert _resolve_patch_fps("auto", songs) == pytest.approx(50.0)
 
     no_metadata = [
         _song(target_frames=100, sample_rate=None, input_samples=96_000),
         _song(target_frames=100, sample_rate=48_000, input_samples=None),
     ]
-    assert _resolve_latent_fps("auto", no_metadata) == pytest.approx(50.0)
+    assert _resolve_patch_fps("auto", no_metadata) == pytest.approx(50.0)
 
 
 def test_segments_for_song_always_covers_tail_segment() -> None:
@@ -154,3 +555,152 @@ def test_build_epoch_segments_full_song_mode_emits_one_segment_per_song() -> Non
     assert all(
         segment.conditioning_source == ConditioningSource.STEREO for segment in segments
     )
+
+
+def test_build_epoch_segments_can_keep_song_local_crops_sorted() -> None:
+    songs = [
+        _song(target_frames=20, sample_rate=48_000, input_samples=20 * 1024),
+        _song(target_frames=20, sample_rate=48_000, input_samples=20 * 1024),
+    ]
+
+    segments = _build_epoch_segments(
+        epoch=0,
+        songs=songs,
+        seed=123,
+        shuffle_segments_within_epoch=True,
+        shuffle_segments_within_song=False,
+        sequence_mode="strided_crops",
+        sequence_frames=4,
+        stride_frames=3,
+        mono_probability=0.0,
+        downmix_probability=0.0,
+    )
+
+    for song_index in {segment.song_index for segment in segments}:
+        starts = [
+            segment.start_frame
+            for segment in segments
+            if segment.song_index == song_index
+        ]
+        assert starts == sorted(starts)
+
+
+def test_load_manifest_records_normalizes_windows_sample_paths(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    manifest_path = dataset_root / "manifest.jsonl"
+    dataset_root.mkdir(parents=True)
+    row = {
+        "stream_hash": "abcd",
+        "sample_dir": r"samples\ab\cd\abcd",
+        "target_signal_shape": [2, 48_000],
+    }
+    manifest_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    songs = _load_manifest_records(
+        dataset_root=dataset_root,
+        manifest_path=manifest_path,
+        patch_size=1024,
+    )
+
+    assert songs[0].sample_dir == dataset_root / "samples" / "ab" / "cd" / "abcd"
+
+
+def _rms_song(name: str, source_rms: float | None) -> SongRecord:
+    return SongRecord(
+        stream_hash=name,
+        sample_dir=Path(name),
+        target_frames=100,
+        target_channels=2,
+        sample_rate=48_000,
+        input_samples=None,
+        signal_rms=(
+            {"source_stereo_signal": source_rms} if source_rms is not None else None
+        ),
+    )
+
+
+def test_filter_songs_by_min_source_rms_drops_quiet_songs() -> None:
+    songs = [
+        _rms_song("loud", 0.10),
+        _rms_song("at_threshold", 0.04),
+        _rms_song("quiet", 0.02),
+        _rms_song("no_rms", None),
+    ]
+
+    kept, dropped, missing = _filter_songs_by_min_source_rms(songs, min_source_rms=0.04)
+
+    assert [song.stream_hash for song in kept] == ["loud", "at_threshold", "no_rms"]
+    assert dropped == 1
+    assert missing == 1
+
+
+def test_filter_songs_by_min_source_rms_disabled_keeps_all() -> None:
+    songs = [_rms_song("quiet", 0.001), _rms_song("no_rms", None)]
+
+    kept, dropped, missing = _filter_songs_by_min_source_rms(songs, min_source_rms=None)
+
+    assert kept == songs
+    assert dropped == 0
+    assert missing == 0
+
+
+def test_filter_songs_by_sample_exclusion_drops_hashes_from_json(
+    tmp_path: Path,
+) -> None:
+    songs = [
+        _rms_song("keep", 0.10),
+        _rms_song("drop_hash", 0.10),
+        _rms_song("drop_sample_name", 0.10),
+    ]
+    exclusion_path = tmp_path / "exclude.json"
+    exclusion_path.write_text(
+        json.dumps(
+            {
+                "exclude_stream_hashes": ["drop_hash"],
+                "exclude_sample_dirs": ["drop_sample_name"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    kept, dropped = _filter_songs_by_sample_exclusion(
+        songs,
+        sample_exclusion_path=exclusion_path,
+    )
+
+    assert [song.stream_hash for song in kept] == ["keep"]
+    assert dropped == 2
+
+
+def test_filter_songs_by_sample_exclusion_disabled_keeps_all() -> None:
+    songs = [_rms_song("a", 0.10), _rms_song("b", 0.10)]
+
+    kept, dropped = _filter_songs_by_sample_exclusion(
+        songs,
+        sample_exclusion_path=None,
+    )
+
+    assert kept == songs
+    assert dropped == 0
+
+
+def test_load_manifest_records_reroots_old_absolute_sample_paths(
+    tmp_path: Path,
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    manifest_path = dataset_root / "manifest.jsonl"
+    dataset_root.mkdir(parents=True)
+    row = {
+        "stream_hash": "abcd",
+        "sample_dir": r"E:\old_dataset\samples\ab\cd\abcd",
+        "target_signal_shape": [2, 48_000],
+    }
+    manifest_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    songs = _load_manifest_records(
+        dataset_root=dataset_root,
+        manifest_path=manifest_path,
+        patch_size=1024,
+    )
+
+    assert songs[0].sample_dir == dataset_root / "samples" / "ab" / "cd" / "abcd"

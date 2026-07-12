@@ -53,8 +53,8 @@ This policy covers vulnerabilities in the repository contents, including:
 - CLI entrypoints such as `train.py` and `infer.py`
 - repository automation under `.github/`
 - dataset, export, and Atmos helper scripts under `scripts/`
-- vendored code in `stereo2spatial/vendor/` as shipped in this repository
+- third-party dependencies used by the training, inference, and data workflows
 
-If the root cause is clearly in an upstream dependency or upstream EAR-VAE
-project rather than this repository's integration layer, coordinated disclosure
-with the upstream project is encouraged.
+If the root cause is clearly in an upstream dependency rather than this
+repository's integration layer, coordinated disclosure with the upstream project
+is encouraged.

@@ -17,6 +17,7 @@ class ReducedAverages:
     avg_adv_loss: float | None
     avg_route_loss: float | None
     avg_corr_loss: float | None
+    avg_loss_terms: dict[str, float]
 
 
 @dataclass
@@ -29,6 +30,7 @@ class RunningLossState:
     adv_loss_sum: torch.Tensor
     route_loss_sum: torch.Tensor
     corr_loss_sum: torch.Tensor
+    loss_term_sums: dict[str, torch.Tensor]
 
     @classmethod
     def create(cls: type[RunningLossState], device: torch.device) -> RunningLossState:
@@ -40,6 +42,7 @@ class RunningLossState:
             adv_loss_sum=torch.zeros((), device=device, dtype=torch.float64),
             route_loss_sum=torch.zeros((), device=device, dtype=torch.float64),
             corr_loss_sum=torch.zeros((), device=device, dtype=torch.float64),
+            loss_term_sums={},
         )
 
 
@@ -52,6 +55,7 @@ def update_running_losses(
     loss_adv_step: torch.Tensor | None,
     loss_route_step: torch.Tensor | None,
     loss_corr_step: torch.Tensor | None,
+    loss_terms_step: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Accumulate one synchronized-step loss tuple into running state."""
     state.loss_sum += loss.detach().to(dtype=torch.float64)
@@ -63,6 +67,12 @@ def update_running_losses(
         state.route_loss_sum += loss_route_step.to(dtype=torch.float64)
     if loss_corr_step is not None:
         state.corr_loss_sum += loss_corr_step.to(dtype=torch.float64)
+    for name, value in (loss_terms_step or {}).items():
+        metric = value.detach().to(device=state.loss_sum.device, dtype=torch.float64)
+        if name in state.loss_term_sums:
+            state.loss_term_sums[name] += metric
+        else:
+            state.loss_term_sums[name] = metric.clone()
 
 
 def compute_reduced_averages(
@@ -94,12 +104,21 @@ def compute_reduced_averages(
         avg_route_loss = float((total_route_loss_sum / denom).item())
         avg_corr_loss = float((total_corr_loss_sum / denom).item())
 
+    avg_loss_terms: dict[str, float] = {}
+    for name in sorted(state.loss_term_sums):
+        total_term_sum = accelerator.reduce(
+            state.loss_term_sums[name],
+            reduction="sum",
+        )
+        avg_loss_terms[name] = float((total_term_sum / denom).item())
+
     return ReducedAverages(
         avg_loss=avg_loss,
         avg_d_loss=avg_d_loss,
         avg_adv_loss=avg_adv_loss,
         avg_route_loss=avg_route_loss,
         avg_corr_loss=avg_corr_loss,
+        avg_loss_terms=avg_loss_terms,
     )
 
 
@@ -118,3 +137,5 @@ def reset_running_losses(
     if use_channel_aux_losses:
         state.route_loss_sum.zero_()
         state.corr_loss_sum.zero_()
+    for name in list(state.loss_term_sums):
+        state.loss_term_sums[name].zero_()

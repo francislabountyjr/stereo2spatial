@@ -16,7 +16,7 @@ def vae_sample(mean, scale):
     latents = torch.randn_like(mean) * stdev + mean
 
     kl = (mean * mean + var - logvar - 1).sum(1).mean()
-    
+
     return latents, kl
 
 
@@ -71,7 +71,7 @@ class EAR_VAE(nn.Module):
         status = self.encoder(audio)
         mean, scale = status.chunk(2, dim=1)
         z, kl = vae_sample(mean, scale)
-        
+
         if self.transformers is not None:
             z = z.permute(0, 2, 1)
             z = self.transformers(z)
@@ -94,7 +94,7 @@ class EAR_VAE(nn.Module):
             z = z.permute(0, 2, 1)
             z = self.transformers(z)
             z = z.permute(0, 2, 1)
-            
+
         x = self.decoder(z)
         return x
 

@@ -22,6 +22,21 @@ def _normalize_ema_storage_device(device: str) -> EMAStorageDevice:
     return cast(EMAStorageDevice, normalized)
 
 
+def _persistent_named_buffers(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """Return buffers that are part of the model state dict, excluding runtime caches."""
+    buffers: dict[str, torch.Tensor] = {}
+    for module_prefix, module in model.named_modules():
+        non_persistent: set[str] = getattr(
+            module, "_non_persistent_buffers_set", set()
+        )
+        for name, buffer in module.named_buffers(recurse=False):
+            if name in non_persistent:
+                continue
+            full_name = f"{module_prefix}.{name}" if module_prefix else name
+            buffers[full_name] = buffer
+    return buffers
+
+
 class EMATeacher:
     """Maintain a frozen EMA copy of a student model for teacher forwards."""
 
@@ -126,11 +141,21 @@ class EMATeacher:
                 )
                 ema_param.mul_(self.decay).add_(source, alpha=one_minus_decay)
 
-            ema_buffers = list(self.model.buffers())
-            student_buffers = list(model.buffers())
-            if len(ema_buffers) != len(student_buffers):
-                raise RuntimeError("EMA/student buffer count mismatch.")
-            for ema_buffer, student_buffer in zip(ema_buffers, student_buffers):
+            ema_buffers = _persistent_named_buffers(self.model)
+            student_buffers = adapt_state_dict_keys_for_model(
+                self.model,
+                _persistent_named_buffers(model),
+            )
+            if set(ema_buffers) != set(student_buffers):
+                raise RuntimeError("EMA/student persistent buffer set mismatch.")
+            for name, ema_buffer in ema_buffers.items():
+                student_buffer = student_buffers[name]
+                if ema_buffer.shape != student_buffer.shape:
+                    raise RuntimeError(
+                        "EMA/student persistent buffer shape mismatch: "
+                        f"{name}: ema={tuple(ema_buffer.shape)} "
+                        f"student={tuple(student_buffer.shape)}"
+                    )
                 ema_buffer.copy_(
                     student_buffer.detach().to(
                         device=ema_buffer.device,

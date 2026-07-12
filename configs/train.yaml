@@ -1,4 +1,4 @@
-﻿seed: 1337
+seed: 1337
 output_dir: runs/train
 
 data:
@@ -8,7 +8,7 @@ data:
   segment_seconds: 10.0
   sequence_seconds: 34.0
   stride_seconds: 8.0
-  latent_fps: 50
+  sample_rate: 48000
   mono_probability: 0.05
   downmix_probability: 0.05
   cache_size: 16
@@ -21,9 +21,10 @@ data:
   drop_last: true
 
 model:
+  architecture: waveform
   target_channels: 12
-  cond_channels: 1
-  latent_dim: 64
+  cond_channels: 2
+  patch_size: 1024
   hidden_dim: 1024
   num_layers: 12
   num_heads: 16
@@ -33,6 +34,12 @@ model:
   timestep_scale: 1000.0
   max_period: 10000.0
   num_memory_tokens: 32
+  mix_style_dim: 13
+  waveform_level_depth: 2
+  waveform_micro_patch_size: 16
+  waveform_hidden_dim: 16
+  waveform_num_heads: 16
+  waveform_mlp_ratio: 2.0
 
 training:
   max_steps: 200000
@@ -60,6 +67,28 @@ training:
   corr_eps: 1.0e-6
   corr_offdiag_only: true
   corr_use_correlation: true
+  downmix_consistency_weight: 1.0
+  downmix_consistency_loss: mse
+  downmix_channel_order: [FL, FR, FC, LFE, BL, BR, SL, SR, TFL, TFR, TBL, TBR]
+  mix_style_dropout_probability: 0.10
+  mrstft_loss_weight: 0.05
+  mrstft_fft_sizes: [512, 1024, 2048]
+  mrstft_hop_lengths: [128, 256, 512]
+  mrstft_win_lengths: [512, 1024, 2048]
+  mrstft_sc_weight: 1.0
+  mrstft_log_mag_weight: 1.0
+  mrstft_eps: 1.0e-7
+  perceptual_loss_weight: 0.0
+  perceptual_n_fft: 1024
+  perceptual_hop_length: 256
+  perceptual_win_length: 1024
+  perceptual_n_mels: 80
+  perceptual_f_min: 40.0
+  perceptual_f_max: null
+  perceptual_band_weight: 1.0
+  perceptual_band_low_hz: 150.0
+  perceptual_band_high_hz: 8000.0
+  perceptual_eps: 1.0e-5
   scheduled_sampling_max_step_offset: 0
   scheduled_sampling_probability: 0.0
   scheduled_sampling_prob_start: null
@@ -100,11 +129,15 @@ training:
   validation_generation_seed: 1337
   validation_generation_input_path: dataset/validation_audio
   validation_generation_output_path: runs/train/validation_generations
-  validation_generation_vae_checkpoint_path: null
-  validation_generation_vae_config_path: null
+  validation_generation_solver: heun
+  validation_generation_solver_steps: 64
+  validation_generation_solver_rtol: 1.0e-5
+  validation_generation_solver_atol: 1.0e-5
+  validation_generation_chunk_seconds: null
+  validation_generation_overlap_seconds: 0.5
 
 optimizer:
-  type: adamw
+  type: muon
   lr: 1.0e-4
   weight_decay: 0.01
   beta1: 0.9
@@ -112,6 +145,8 @@ optimizer:
   eps: 1.0e-8
   adamw_fused: true
   adamw_foreach: false
+  muon_ns_steps: 5
+  muon_nesterov: true
 
 scheduler:
   type: cosine

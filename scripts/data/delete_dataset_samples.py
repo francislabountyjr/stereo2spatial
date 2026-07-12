@@ -13,10 +13,10 @@ from typing import Iterable
 METADATA_FILENAME = "metadata.json"
 MANIFEST_FILENAME = "manifest.jsonl"
 SAMPLE_BUNDLE_FILENAME = "sample_bundle.pt"
-TARGET_LATENT_FILENAME = "target_latent.pt"
-SOURCE_STEREO_LATENT_FILENAME = "source_stereo_latent.pt"
-SOURCE_MONO_LATENT_FILENAME = "source_mono_latent.pt"
-SOURCE_DOWNMIX_LATENT_FILENAME = "source_downmix_latent.pt"
+TARGET_SIGNAL_FILENAME = "target_signal.pt"
+SOURCE_STEREO_SIGNAL_FILENAME = "source_stereo_signal.pt"
+SOURCE_MONO_SIGNAL_FILENAME = "source_mono_signal.pt"
+SOURCE_DOWNMIX_SIGNAL_FILENAME = "source_downmix_signal.pt"
 
 DRIVE_ABS_RE = re.compile(r"^[a-zA-Z]:([\\/]|$)")
 
@@ -161,10 +161,8 @@ def sample_dir_is_loadable(sample_dir: Path) -> bool:
         return True
 
     split_required = [
-        sample_dir / TARGET_LATENT_FILENAME,
-        sample_dir / SOURCE_STEREO_LATENT_FILENAME,
-        sample_dir / SOURCE_MONO_LATENT_FILENAME,
-        sample_dir / SOURCE_DOWNMIX_LATENT_FILENAME,
+        sample_dir / TARGET_SIGNAL_FILENAME,
+        sample_dir / SOURCE_STEREO_SIGNAL_FILENAME,
     ]
     return all(path.exists() for path in split_required)
 

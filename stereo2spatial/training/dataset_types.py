@@ -1,4 +1,4 @@
-"""Typed records used by the latent-song dataset runtime."""
+"""Typed records used by the signal-song dataset runtime."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 class ConditioningSource(IntEnum):
-    """Enumerated conditioning latent source used for one training sample."""
+    """Enumerated conditioning signal source used for one training sample."""
 
     STEREO = 0
     MONO = 1
@@ -17,7 +17,7 @@ class ConditioningSource(IntEnum):
 
 @dataclass(frozen=True)
 class SongRecord:
-    """Manifest-level metadata for one latent-song sample directory."""
+    """Manifest-level metadata for one signal-song sample directory."""
 
     stream_hash: str
     sample_dir: Path
@@ -25,6 +25,8 @@ class SongRecord:
     target_channels: int
     sample_rate: int | None
     input_samples: int | None
+    mix_style: tuple[float, ...] | None = None
+    signal_rms: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)

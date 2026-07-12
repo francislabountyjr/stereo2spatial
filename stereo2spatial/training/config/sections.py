@@ -44,21 +44,178 @@ def _optional_float_list(value: Any) -> list[float] | None:
     raise TypeError("Expected flow_custom_timesteps to be a list/tuple or null.")
 
 
+def _int_list(value: Any, default: list[int]) -> list[int]:
+    """Return a list of coerced ints from config or a default list."""
+    if value is None:
+        return list(default)
+    if isinstance(value, (list, tuple)):
+        return [int(item) for item in value]
+    raise TypeError("Expected value to be a list/tuple or null.")
+
+
+def _optional_int_list(value: Any) -> list[int] | None:
+    """Return ``None`` or a list of coerced ints."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [int(item) for item in value]
+    raise TypeError("Expected value to be a list/tuple or null.")
+
+
+def _optional_str_list(value: Any) -> list[str] | None:
+    """Return ``None`` or a list of coerced string values."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    raise TypeError("Expected value to be a list/tuple or null.")
+
+
+def _optional_path_or_path_list(value: Any) -> str | list[str] | None:
+    """Return ``None``, one string path, or a list of string paths."""
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    raise TypeError("Expected value to be a path string, list/tuple, or null.")
+
+
+def _coerce_dataset_paths(
+    data_raw: dict[str, Any],
+) -> tuple[str | list[str], str | list[str]]:
+    """Return dataset roots and manifests from single-path or multi-path config."""
+    datasets_raw = data_raw.get("datasets")
+    if datasets_raw is not None:
+        if not isinstance(datasets_raw, (list, tuple)) or not datasets_raw:
+            raise TypeError("data.datasets must be a non-empty list of mappings.")
+
+        roots: list[str] = []
+        manifests: list[str] = []
+        for index, item in enumerate(datasets_raw):
+            if not isinstance(item, dict):
+                raise TypeError(f"data.datasets[{index}] must be a mapping.")
+            roots.append(str(require_key(item, "dataset_root")))
+            manifests.append(str(require_key(item, "manifest_path")))
+        return roots, manifests
+
+    dataset_root = require_key(data_raw, "dataset_root")
+    manifest_path = require_key(data_raw, "manifest_path")
+    if isinstance(dataset_root, (list, tuple)) or isinstance(
+        manifest_path, (list, tuple)
+    ):
+        if not isinstance(dataset_root, (list, tuple)):
+            raise TypeError(
+                "data.dataset_root must be a list when manifest_path is a list."
+            )
+        if not isinstance(manifest_path, (list, tuple)):
+            raise TypeError(
+                "data.manifest_path must be a list when dataset_root is a list."
+            )
+        roots = [str(item) for item in dataset_root]
+        manifests = [str(item) for item in manifest_path]
+        if not roots:
+            raise ValueError("data.dataset_root must contain at least one path.")
+        if len(roots) != len(manifests):
+            raise ValueError(
+                "data.dataset_root and data.manifest_path lists must have the same length."
+            )
+        return roots, manifests
+
+    return str(dataset_root), str(manifest_path)
+
+
+def _build_source_resample_aug_fields(data_raw: dict[str, Any]) -> dict[str, Any]:
+    """Build optional source-only sample-rate roundtrip augmentation fields."""
+    aug_raw = data_raw.get("source_resample_augmentation")
+    if aug_raw is None:
+        aug_raw = {}
+    if not isinstance(aug_raw, dict):
+        raise TypeError("data.source_resample_augmentation must be a mapping.")
+
+    return {
+        "source_resample_aug_enabled": bool(aug_raw.get("enabled", False)),
+        "source_resample_aug_probability": float(aug_raw.get("probability", 0.0)),
+        "source_resample_aug_rates": _optional_int_list(aug_raw.get("rates")),
+        "source_resample_aug_weights": _optional_float_list(aug_raw.get("weights")),
+    }
+
+
+def _build_source_codec_aug_fields(data_raw: dict[str, Any]) -> dict[str, Any]:
+    """Build optional source-only lossy-codec augmentation fields."""
+    aug_raw = data_raw.get("source_codec_augmentation")
+    if aug_raw is None:
+        aug_raw = {}
+    if not isinstance(aug_raw, dict):
+        raise TypeError("data.source_codec_augmentation must be a mapping.")
+
+    codecs_raw = aug_raw.get("codecs")
+    codecs: list[str] | None = None
+    codec_weights: list[float] | None = None
+    bitrates: dict[str, list[int]] | None = None
+    if codecs_raw is not None:
+        if not isinstance(codecs_raw, dict):
+            raise TypeError("data.source_codec_augmentation.codecs must be a mapping.")
+        codecs = []
+        codec_weights = []
+        bitrates = {}
+        for codec_name, codec_raw in codecs_raw.items():
+            if not isinstance(codec_raw, dict):
+                raise TypeError(
+                    "data.source_codec_augmentation.codecs entries must be mappings."
+                )
+            name = str(codec_name).strip().lower()
+            codecs.append(name)
+            codec_weights.append(float(codec_raw.get("weight", 1.0)))
+            bitrates[name] = _int_list(codec_raw.get("bitrates"), [])
+
+    max_chunk_seconds = aug_raw.get("max_chunk_seconds", 12.0)
+    return {
+        "source_codec_aug_enabled": bool(aug_raw.get("enabled", False)),
+        "source_codec_aug_probability": float(aug_raw.get("probability", 0.0)),
+        "source_codec_aug_start_step": int(aug_raw.get("start_step", 0)),
+        "source_codec_aug_full_strength_step": int(
+            aug_raw.get("full_strength_step", 0)
+        ),
+        "source_codec_aug_backend": str(aug_raw.get("backend", "auto")),
+        "source_codec_aug_ffmpeg_path": str(aug_raw.get("ffmpeg_path", "ffmpeg")),
+        "source_codec_aug_codecs": codecs,
+        "source_codec_aug_codec_weights": codec_weights,
+        "source_codec_aug_bitrates": bitrates,
+        "source_codec_aug_max_chunk_seconds": (
+            None if max_chunk_seconds is None else float(max_chunk_seconds)
+        ),
+        "source_codec_aug_align_max_lag": int(aug_raw.get("align_max_lag", 8192)),
+        "source_codec_aug_timeout_seconds": float(aug_raw.get("timeout_seconds", 20.0)),
+    }
+
+
 def build_data_config(data_raw: dict[str, Any]) -> DataConfig:
     """Coerce the ``data`` section into :class:`DataConfig`."""
+    dataset_root, manifest_path = _coerce_dataset_paths(data_raw)
     return DataConfig(
-        dataset_root=str(require_key(data_raw, "dataset_root")),
-        manifest_path=str(require_key(data_raw, "manifest_path")),
+        dataset_root=dataset_root,
+        manifest_path=manifest_path,
         sample_artifact_mode=str(require_key(data_raw, "sample_artifact_mode")),
         segment_seconds=float(require_key(data_raw, "segment_seconds")),
         sequence_seconds=float(require_key(data_raw, "sequence_seconds")),
         stride_seconds=float(require_key(data_raw, "stride_seconds")),
-        latent_fps=require_key(data_raw, "latent_fps"),
+        # Historical latent configs predate this field; EAR-VAE operates at 48 kHz.
+        sample_rate=int(data_raw.get("sample_rate", 48_000)),
+        training_sample_rate=(
+            None
+            if data_raw.get("training_sample_rate") is None
+            else int(data_raw["training_sample_rate"])
+        ),
         mono_probability=float(require_key(data_raw, "mono_probability")),
         downmix_probability=float(require_key(data_raw, "downmix_probability")),
         cache_size=int(require_key(data_raw, "cache_size")),
         shuffle_segments_within_epoch=bool(
             require_key(data_raw, "shuffle_segments_within_epoch")
+        ),
+        shuffle_segments_within_song=bool(
+            data_raw.get("shuffle_segments_within_song", True)
         ),
         batch_size=int(require_key(data_raw, "batch_size")),
         num_workers=int(require_key(data_raw, "num_workers")),
@@ -66,15 +223,86 @@ def build_data_config(data_raw: dict[str, Any]) -> DataConfig:
         pin_memory=bool(require_key(data_raw, "pin_memory")),
         persistent_workers=bool(require_key(data_raw, "persistent_workers")),
         drop_last=bool(require_key(data_raw, "drop_last")),
+        sample_exclusion_path=_optional_path_or_path_list(
+            data_raw.get("sample_exclusion_path")
+        ),
+        materialize_cached_signals=bool(
+            data_raw.get("materialize_cached_signals", False)
+        ),
+        batch_mode=str(data_raw.get("batch_mode", "standard")),
+        amplitude_lift_enabled=bool(data_raw.get("amplitude_lift_enabled", False)),
+        amplitude_lift_mode=str(data_raw.get("amplitude_lift_mode", "rms")),
+        amplitude_lift_reference=str(
+            data_raw.get("amplitude_lift_reference", "source")
+        ),
+        amplitude_lift_target_rms=float(
+            data_raw.get("amplitude_lift_target_rms", 0.33)
+        ),
+        amplitude_lift_scale=float(data_raw.get("amplitude_lift_scale", 3.0)),
+        amplitude_lift_clip_value=(
+            None
+            if data_raw.get("amplitude_lift_clip_value", 4.0) is None
+            else float(data_raw.get("amplitude_lift_clip_value", 4.0))
+        ),
+        amplitude_lift_gain_power=float(data_raw.get("amplitude_lift_gain_power", 1.0)),
+        amplitude_lift_gain_min_value=(
+            None
+            if data_raw.get("amplitude_lift_gain_min_value") is None
+            else float(data_raw["amplitude_lift_gain_min_value"])
+        ),
+        amplitude_lift_waveform_clamp=bool(
+            data_raw.get("amplitude_lift_waveform_clamp", True)
+        ),
+        amplitude_lift_peak_limit=float(data_raw.get("amplitude_lift_peak_limit", 1.0)),
+        amplitude_lift_peak_rescale_min_rms=float(
+            data_raw.get("amplitude_lift_peak_rescale_min_rms", 0.3)
+        ),
+        amplitude_lift_output_lufs=float(
+            data_raw.get("amplitude_lift_output_lufs", -23.0)
+        ),
+        amplitude_lift_eps=float(data_raw.get("amplitude_lift_eps", 1.0e-8)),
+        min_source_rms=(
+            None
+            if data_raw.get("min_source_rms") is None
+            else float(data_raw["min_source_rms"])
+        ),
+        **_build_source_resample_aug_fields(data_raw),
+        **_build_source_codec_aug_fields(data_raw),
+        latent_fps=data_raw.get("latent_fps", 50.0),
     )
 
 
 def build_model_config(model_raw: dict[str, Any]) -> ModelConfig:
     """Coerce the ``model`` section into :class:`ModelConfig`."""
+    architecture_raw = model_raw.get("architecture", model_raw.get("model_variant"))
+    has_patch_size = model_raw.get("patch_size") is not None
+    has_latent_dim = model_raw.get("latent_dim") is not None
+    if architecture_raw is None:
+        if has_latent_dim and not has_patch_size:
+            architecture = "legacy_vae"
+        else:
+            architecture = "waveform"
+    else:
+        architecture = str(architecture_raw).strip().lower()
+    if architecture in {"vae", "latent", "vae_latent", "ear_vae_latent_v1"}:
+        architecture = "legacy_vae"
+    elif architecture in {"no_vae", "waveform_patch", "waveform_dit"}:
+        architecture = "waveform"
+
+    feature_size_raw = (
+        model_raw.get("latent_dim")
+        if architecture == "legacy_vae"
+        else model_raw.get("patch_size")
+    )
+    if feature_size_raw is None:
+        required_name = "latent_dim" if architecture == "legacy_vae" else "patch_size"
+        raise KeyError(f"Missing required config key: {required_name}")
     return ModelConfig(
         target_channels=int(require_key(model_raw, "target_channels")),
         cond_channels=int(require_key(model_raw, "cond_channels")),
-        latent_dim=int(require_key(model_raw, "latent_dim")),
+        # ``patch_size`` is the shared feature-axis width at runtime. For legacy
+        # models it aliases latent_dim so generic window/sampler code can be reused.
+        patch_size=int(feature_size_raw),
         hidden_dim=int(require_key(model_raw, "hidden_dim")),
         num_layers=int(require_key(model_raw, "num_layers")),
         num_heads=int(require_key(model_raw, "num_heads")),
@@ -84,6 +312,30 @@ def build_model_config(model_raw: dict[str, Any]) -> ModelConfig:
         timestep_scale=float(require_key(model_raw, "timestep_scale")),
         max_period=float(require_key(model_raw, "max_period")),
         num_memory_tokens=int(model_raw.get("num_memory_tokens", 0)),
+        mix_style_dim=int(model_raw.get("mix_style_dim", 0)),
+        amplitude_gain_conditioning=bool(
+            model_raw.get("amplitude_gain_conditioning", False)
+        ),
+        waveform_level_depth=int(model_raw.get("waveform_level_depth", 0)),
+        waveform_micro_patch_size=int(model_raw.get("waveform_micro_patch_size", 16)),
+        waveform_hidden_dim=int(model_raw.get("waveform_hidden_dim", 16)),
+        waveform_num_heads=(
+            int(model_raw["waveform_num_heads"])
+            if model_raw.get("waveform_num_heads") is not None
+            else None
+        ),
+        waveform_mlp_ratio=float(model_raw.get("waveform_mlp_ratio", 2.0)),
+        final_output_kernel_size=int(model_raw.get("final_output_kernel_size", 7)),
+        final_output_zero_init=bool(model_raw.get("final_output_zero_init", False)),
+        rope_enabled=bool(model_raw.get("rope_enabled", True)),
+        rope_theta=float(model_raw.get("rope_theta", 10000.0)),
+        activation_checkpointing=bool(model_raw.get("activation_checkpointing", False)),
+        architecture=architecture,
+        latent_dim=(
+            int(model_raw.get("latent_dim", feature_size_raw))
+            if architecture == "legacy_vae"
+            else None
+        ),
     )
 
 
@@ -100,6 +352,11 @@ def _build_training_checkpoint_fields(training_raw: dict[str, Any]) -> dict[str,
             if training_raw.get("init_from_checkpoint") is not None
             else None
         ),
+        "init_from_checkpoint_weights_source": str(
+            training_raw.get("init_from_checkpoint_weights_source", "student")
+        )
+        .strip()
+        .lower(),
     }
 
 
@@ -197,11 +454,114 @@ def _build_training_aux_loss_fields(training_raw: dict[str, Any]) -> dict[str, A
         ),
         "corr_offdiag_only": bool(training_raw.get("corr_offdiag_only", True)),
         "corr_use_correlation": bool(training_raw.get("corr_use_correlation", True)),
+        "downmix_consistency_weight": float(
+            training_raw.get("downmix_consistency_weight", 0.0)
+        ),
+        "downmix_consistency_loss": str(
+            training_raw.get("downmix_consistency_loss", "mse")
+        ),
+        "downmix_channel_order": _optional_str_list(
+            training_raw.get("downmix_channel_order")
+        ),
+        "mix_style_dropout_probability": float(
+            training_raw.get("mix_style_dropout_probability", 0.0)
+        ),
+        "mrstft_loss_weight": float(training_raw.get("mrstft_loss_weight", 0.0)),
+        "mrstft_fft_sizes": _int_list(
+            training_raw.get("mrstft_fft_sizes"),
+            [512, 1024, 2048],
+        ),
+        "mrstft_hop_lengths": _int_list(
+            training_raw.get("mrstft_hop_lengths"),
+            [128, 256, 512],
+        ),
+        "mrstft_win_lengths": _int_list(
+            training_raw.get("mrstft_win_lengths"),
+            [512, 1024, 2048],
+        ),
+        "mrstft_sc_weight": float(training_raw.get("mrstft_sc_weight", 1.0)),
+        "mrstft_log_mag_weight": float(training_raw.get("mrstft_log_mag_weight", 1.0)),
+        "mrstft_eps": float(training_raw.get("mrstft_eps", 1e-7)),
+        "waveform_mse_loss_weight": float(
+            training_raw.get("waveform_mse_loss_weight", 1.0)
+        ),
+        "waveform_l1_loss_weight": float(
+            training_raw.get("waveform_l1_loss_weight", 0.0)
+        ),
+        "waveform_charbonnier_loss_weight": float(
+            training_raw.get("waveform_charbonnier_loss_weight", 0.0)
+        ),
+        "waveform_charbonnier_eps": float(
+            training_raw.get("waveform_charbonnier_eps", 1e-3)
+        ),
+        "x_pred_v_loss_weight": float(training_raw.get("x_pred_v_loss_weight", 0.0)),
+        "perceptual_loss_weight": float(
+            training_raw.get("perceptual_loss_weight", 0.0)
+        ),
+        "perceptual_n_fft": int(training_raw.get("perceptual_n_fft", 1024)),
+        "perceptual_hop_length": int(training_raw.get("perceptual_hop_length", 256)),
+        "perceptual_win_length": int(training_raw.get("perceptual_win_length", 1024)),
+        "perceptual_n_mels": int(training_raw.get("perceptual_n_mels", 80)),
+        "perceptual_f_min": float(training_raw.get("perceptual_f_min", 40.0)),
+        "perceptual_f_max": _optional_float(training_raw.get("perceptual_f_max")),
+        "perceptual_band_weight": float(
+            training_raw.get("perceptual_band_weight", 1.0)
+        ),
+        "perceptual_band_low_hz": float(
+            training_raw.get("perceptual_band_low_hz", 150.0)
+        ),
+        "perceptual_band_high_hz": float(
+            training_raw.get("perceptual_band_high_hz", 8000.0)
+        ),
+        "perceptual_eps": float(training_raw.get("perceptual_eps", 1e-5)),
+        "binaural_ild_loss_weight": float(
+            training_raw.get("binaural_ild_loss_weight", 0.0)
+        ),
+        "binaural_ipd_loss_weight": float(
+            training_raw.get("binaural_ipd_loss_weight", 0.0)
+        ),
+        "binaural_ccf_loss_weight": float(
+            training_raw.get("binaural_ccf_loss_weight", 0.0)
+        ),
+        "binaural_frame_ild_loss_weight": float(
+            training_raw.get("binaural_frame_ild_loss_weight", 0.0)
+        ),
+        "binaural_frame_ild_frame_size": int(
+            training_raw.get("binaural_frame_ild_frame_size", 2048)
+        ),
+        "binaural_frame_ild_hop_size": int(
+            training_raw.get("binaural_frame_ild_hop_size", 1024)
+        ),
+        "binaural_frame_ild_silence_threshold": float(
+            training_raw.get("binaural_frame_ild_silence_threshold", 1e-4)
+        ),
+        "binaural_frame_ild_max_weight": float(
+            training_raw.get("binaural_frame_ild_max_weight", 4.0)
+        ),
+        "binaural_mid_side_loss_weight": float(
+            training_raw.get("binaural_mid_side_loss_weight", 0.0)
+        ),
+        "binaural_mid_side_loss_type": str(
+            training_raw.get("binaural_mid_side_loss_type", "charbonnier")
+        ),
+        "binaural_mid_side_mid_weight": float(
+            training_raw.get("binaural_mid_side_mid_weight", 0.0)
+        ),
+        "binaural_mid_side_side_weight": float(
+            training_raw.get("binaural_mid_side_side_weight", 1.0)
+        ),
+        "binaural_mid_side_charbonnier_eps": float(
+            training_raw.get("binaural_mid_side_charbonnier_eps", 1e-3)
+        ),
+        "binaural_loss_warmup_steps": int(
+            training_raw.get("binaural_loss_warmup_steps", 0)
+        ),
+        "binaural_loss_eps": float(training_raw.get("binaural_loss_eps", 1e-7)),
     }
 
 
 def _build_training_validation_fields(training_raw: dict[str, Any]) -> dict[str, Any]:
-    """Build latent/generation validation-related training fields."""
+    """Build validation-related training fields."""
     return {
         "run_validation": bool(training_raw.get("run_validation", False)),
         "validation_dataset_root": optional_str(
@@ -229,6 +589,24 @@ def _build_training_validation_fields(training_raw: dict[str, Any]) -> dict[str,
         ),
         "validation_generation_vae_config_path": optional_str(
             training_raw.get("validation_generation_vae_config_path")
+        ),
+        "validation_generation_solver": str(
+            training_raw.get("validation_generation_solver", "heun")
+        ),
+        "validation_generation_solver_steps": int(
+            training_raw.get("validation_generation_solver_steps", 64)
+        ),
+        "validation_generation_solver_rtol": float(
+            training_raw.get("validation_generation_solver_rtol", 1e-5)
+        ),
+        "validation_generation_solver_atol": float(
+            training_raw.get("validation_generation_solver_atol", 1e-5)
+        ),
+        "validation_generation_chunk_seconds": _optional_float(
+            training_raw.get("validation_generation_chunk_seconds")
+        ),
+        "validation_generation_overlap_seconds": float(
+            training_raw.get("validation_generation_overlap_seconds", 0.5)
         ),
     }
 
@@ -340,7 +718,9 @@ def build_training_config(
         grad_clip_norm=float(require_key(training_raw, "grad_clip_norm")),
         log_every=int(require_key(training_raw, "log_every")),
         checkpoint_every=int(require_key(training_raw, "checkpoint_every")),
-        max_checkpoints_to_keep=int(require_key(training_raw, "max_checkpoints_to_keep")),
+        max_checkpoints_to_keep=int(
+            require_key(training_raw, "max_checkpoints_to_keep")
+        ),
         num_epochs_hint=int(require_key(training_raw, "num_epochs_hint")),
         window_seconds=float(require_key(training_raw, "window_seconds")),
         overlap_seconds=float(require_key(training_raw, "overlap_seconds")),
@@ -368,6 +748,8 @@ def build_optimizer_config(optimizer_raw: dict[str, Any]) -> OptimizerConfig:
         eps=float(require_key(optimizer_raw, "eps")),
         adamw_fused=bool(optimizer_raw.get("adamw_fused", False)),
         adamw_foreach=bool(optimizer_raw.get("adamw_foreach", False)),
+        muon_ns_steps=int(optimizer_raw.get("muon_ns_steps", 5)),
+        muon_nesterov=bool(optimizer_raw.get("muon_nesterov", True)),
     )
 
 

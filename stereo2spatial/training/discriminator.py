@@ -1,4 +1,4 @@
-"""PatchGAN discriminators and GAN loss primitives for latent-space training."""
+"""PatchGAN discriminators and GAN loss primitives for waveform-patch training."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def _sn(module: nn.Module) -> nn.Module:
 
 class PatchDiscriminator2D(nn.Module):
     """
-    Latent-space PatchGAN discriminator.
+    Waveform-patch PatchGAN discriminator.
 
     Input: [B, C, F, T] where C = cond_channels + target_channels.
     Output: [B, 1, F', T'] patch-level logits.
@@ -75,13 +75,13 @@ class PatchDiscriminator2D(nn.Module):
         self.net: nn.Sequential = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute patch-level discriminator logits for one latent batch."""
+        """Compute patch-level discriminator logits for one waveform-patch batch."""
         return cast(torch.Tensor, self.net(x))
 
 
 class MultiScaleDiscriminator(nn.Module):
     """
-    Multi-scale latent-space discriminator.
+    Multi-scale waveform-patch discriminator.
 
     - fine: time-only downsampling for local/detail texture.
     - coarse: frequency+time downsampling for broader structure.
@@ -112,7 +112,7 @@ class MultiScaleDiscriminator(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Return fine/coarse discriminator outputs for the same latent batch."""
+        """Return fine/coarse discriminator outputs for the same waveform-patch batch."""
         return {
             "fine": self.fine(x),
             "coarse": self.coarse(x),

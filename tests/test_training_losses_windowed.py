@@ -47,7 +47,7 @@ def test_prepare_flow_matching_inputs_masks_invalid_frames() -> None:
     assert prepared.t_eff == 4
     assert prepared.z1[..., 2:].abs().sum().item() == 0.0
     assert prepared.z_cond[..., 2:].abs().sum().item() == 0.0
-    assert prepared.target_velocity.shape == z1.shape
+    assert prepared.z0.shape == z1.shape
     assert prepared.t.shape == (1,)
 
 
@@ -145,14 +145,12 @@ def test_resolve_window_plan_uses_cached_metadata() -> None:
 def test_slice_and_pad_window_right_pads_partial_segment() -> None:
     zt = torch.arange(3, dtype=torch.float32).view(1, 1, 1, 3)
     zc = torch.ones_like(zt)
-    tv = torch.full_like(zt, 4.0)
     z1 = torch.full_like(zt, 7.0)
     vm = torch.tensor([[True, True, True]])
 
-    zt_w, zc_w, tv_w, vm_w, z1_w = slice_and_pad_window(
+    zt_w, zc_w, vm_w, z1_w = slice_and_pad_window(
         zt=zt,
         z_cond=zc,
-        target_velocity=tv,
         valid_mask=vm,
         start=1,
         end=3,
@@ -163,7 +161,6 @@ def test_slice_and_pad_window_right_pads_partial_segment() -> None:
 
     assert zt_w.shape == (1, 1, 1, 4)
     assert zc_w.shape == (1, 1, 1, 4)
-    assert tv_w.shape == (1, 1, 1, 4)
     assert vm_w.shape == (1, 4)
     assert z1_w is not None and z1_w.shape == (1, 1, 1, 4)
     assert torch.allclose(zt_w[..., 0], torch.tensor([[[1.0]]]))
@@ -187,21 +184,21 @@ def test_resolve_window_weight_uses_cache_with_cast() -> None:
     assert torch.allclose(weight, torch.tensor([1.0, 0.5], dtype=torch.float32))
 
 
-def test_compute_flow_matching_window_loss_matches_baseline_when_reflex_disabled() -> None:
+def test_compute_flow_matching_window_loss_matches_clean_baseline_when_reflex_disabled() -> None:
     prediction = torch.tensor([[[[0.1, 0.2, 0.3]]]], dtype=torch.float32)
-    target_velocity = torch.tensor([[[[0.0, 0.1, 0.2]]]], dtype=torch.float32)
+    target_clean = torch.tensor([[[[0.0, 0.1, 0.2]]]], dtype=torch.float32)
     valid_mask = torch.tensor([[True, True, False]])
     frame_weight = torch.tensor([1.0, 0.5, 0.25], dtype=torch.float32)
 
     baseline = _compute_loss_weighted(
         prediction=prediction,
-        target_velocity=target_velocity,
+        target_clean=target_clean,
         valid_mask=valid_mask,
         frame_weight=frame_weight,
     )
     reflex_disabled = compute_flow_matching_window_loss(
         prediction=prediction,
-        target_velocity=target_velocity,
+        target_clean=target_clean,
         valid_mask=valid_mask,
         frame_weight=frame_weight,
         reflex_enabled=False,
@@ -212,20 +209,20 @@ def test_compute_flow_matching_window_loss_matches_baseline_when_reflex_disabled
 
 def test_compute_flow_matching_window_loss_applies_sample_weights() -> None:
     prediction = torch.zeros(2, 1, 1, 1, dtype=torch.float32)
-    target_velocity = torch.ones(2, 1, 1, 1, dtype=torch.float32)
+    target_clean = torch.ones(2, 1, 1, 1, dtype=torch.float32)
     valid_mask = torch.ones(2, 1, dtype=torch.bool)
     frame_weight = torch.ones(1, dtype=torch.float32)
 
     unweighted = compute_flow_matching_window_loss(
         prediction=prediction,
-        target_velocity=target_velocity,
+        target_clean=target_clean,
         valid_mask=valid_mask,
         frame_weight=frame_weight,
         reflex_enabled=False,
     )
     weighted = compute_flow_matching_window_loss(
         prediction=prediction,
-        target_velocity=target_velocity,
+        target_clean=target_clean,
         valid_mask=valid_mask,
         frame_weight=frame_weight,
         sample_loss_weight=torch.tensor([1.0, 2.0], dtype=torch.float32),
@@ -236,15 +233,71 @@ def test_compute_flow_matching_window_loss_applies_sample_weights() -> None:
     assert weighted.item() == pytest.approx(1.5, abs=1e-7)
 
 
+def test_compute_flow_matching_window_loss_supports_l1_and_charbonnier() -> None:
+    prediction = torch.tensor([[[[2.0, 0.0]]]], dtype=torch.float32)
+    target_clean = torch.zeros_like(prediction)
+    valid_mask = torch.ones(1, 2, dtype=torch.bool)
+    frame_weight = torch.ones(2, dtype=torch.float32)
+
+    loss = compute_flow_matching_window_loss(
+        prediction=prediction,
+        target_clean=target_clean,
+        valid_mask=valid_mask,
+        frame_weight=frame_weight,
+        waveform_mse_loss_weight=0.0,
+        waveform_l1_loss_weight=1.0,
+        waveform_charbonnier_loss_weight=1.0,
+        waveform_charbonnier_eps=1e-3,
+        reflex_enabled=False,
+    )
+
+    expected_l1 = 1.0
+    expected_charbonnier = (
+        (torch.sqrt(torch.tensor(4.0 + 1e-6)) - 1e-3)
+        + (torch.sqrt(torch.tensor(1e-6)) - 1e-3)
+    ) / 2.0
+    assert loss.item() == pytest.approx(
+        float(expected_l1 + expected_charbonnier.item()),
+        abs=1e-6,
+    )
+
+
+def test_compute_flow_matching_window_loss_supports_x_pred_v_loss() -> None:
+    prediction = torch.tensor([[[[0.5, 0.0]]]], dtype=torch.float32)
+    target_clean = torch.tensor([[[[1.0, 0.0]]]], dtype=torch.float32)
+    noisy_state = torch.zeros_like(prediction)
+    valid_mask = torch.ones(1, 2, dtype=torch.bool)
+    frame_weight = torch.ones(2, dtype=torch.float32)
+
+    loss_metrics: dict[str, torch.Tensor] = {}
+    loss = compute_flow_matching_window_loss(
+        prediction=prediction,
+        target_clean=target_clean,
+        noisy_state=noisy_state,
+        t=torch.tensor([0.5], dtype=torch.float32),
+        valid_mask=valid_mask,
+        frame_weight=frame_weight,
+        waveform_mse_loss_weight=0.0,
+        waveform_l1_loss_weight=0.0,
+        waveform_charbonnier_loss_weight=0.0,
+        x_pred_v_loss_weight=2.0,
+        loss_metrics=loss_metrics,
+        reflex_enabled=False,
+    )
+
+    assert loss.item() == pytest.approx(1.0, abs=1e-7)
+    assert loss_metrics["xpv"].item() == pytest.approx(1.0, abs=1e-7)
+
+
 def test_compute_flow_matching_window_loss_reflex_adr_uses_biased_direction() -> None:
     prediction = torch.tensor([[[[1.0]]]], dtype=torch.float32)
-    target_velocity = torch.tensor([[[[1.0]]]], dtype=torch.float32)
+    target_clean = torch.tensor([[[[1.0]]]], dtype=torch.float32)
     valid_mask = torch.tensor([[True]])
     frame_weight = torch.tensor([1.0], dtype=torch.float32)
 
     loss_without_biased_vector = compute_flow_matching_window_loss(
         prediction=prediction,
-        target_velocity=target_velocity,
+        target_clean=target_clean,
         valid_mask=valid_mask,
         frame_weight=frame_weight,
         reflex_enabled=True,
@@ -254,7 +307,7 @@ def test_compute_flow_matching_window_loss_reflex_adr_uses_biased_direction() ->
     )
     loss_with_biased_vector = compute_flow_matching_window_loss(
         prediction=prediction,
-        target_velocity=target_velocity,
+        target_clean=target_clean,
         valid_mask=valid_mask,
         frame_weight=frame_weight,
         reflex_enabled=True,
