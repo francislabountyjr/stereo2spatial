@@ -1,5 +1,21 @@
 # stereo2spatial
 
+<p align="center">
+  <img src="./assets/Wide310x150Logo.scale-200.png" alt="Stereo2Spatial logo" width="420" />
+</p>
+
+<p align="center">
+  <a href="https://get.microsoft.com/installer/download/9PJ6R7RQDVP1?referrer=appbadge&cid=model-github-readme" target="_self">
+    <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200" alt="Download from Microsoft" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://stereo2spatial.francislabounty.com/">App Homepage</a> | <a href="https://francislabounty.com/blog/stereo2spatial">Case Study</a>
+</p>
+
+[![CI](https://github.com/francislabountyjr/stereo2spatial/actions/workflows/ci.yml/badge.svg)](https://github.com/francislabountyjr/stereo2spatial/actions/workflows/ci.yml)
+
 `stereo2spatial` trains and runs conditional flow models that map mono or stereo
 music to spatial audio. The default target layout is `7.1.4`, but the same stack
 also supports binaural stereo, 5.1, 7.1, and other configured channel layouts.
