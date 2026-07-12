@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,6 +23,7 @@ from stereo2spatial.modeling.factory import (
     LEGACY_VAE_ARCHITECTURE,
     normalize_model_architecture,
 )
+from stereo2spatial.training.config import load_config
 from stereo2spatial.training.config.types import (
     DataConfig,
     ModelConfig,
@@ -37,12 +38,16 @@ EXPORT_BUNDLE_WEIGHTS_FILENAME = "model.safetensors"
 EXPORT_BUNDLE_VAE_DIRNAME = "vae"
 EXPORT_BUNDLE_VAE_CONFIG_FILENAME = "ear_vae_v2.json"
 EXPORT_BUNDLE_VAE_WEIGHTS_FILENAME = "ear_vae_v2_48k.pyt"
+EXPORT_BUNDLE_KIND = "stereo2spatial_inference_bundle"
+EXPORT_BUNDLE_SCHEMA_VERSION = 1
 DEFAULT_BUNDLE_CHUNK_SECONDS = 10.0
 DEFAULT_BUNDLE_OVERLAP_SECONDS = 2.0
 DEFAULT_BUNDLE_SOLVER = "auto"
 DEFAULT_BUNDLE_SOLVER_STEPS = 64
 DEFAULT_BUNDLE_SOLVER_RTOL = 1.0e-5
 DEFAULT_BUNDLE_SOLVER_ATOL = 1.0e-5
+DEFAULT_BUNDLE_SAMPLING_ORDER = "timestep_major"
+DEFAULT_BUNDLE_SEED = 1337
 LEGACY_VAE_SAMPLE_RATE = 48_000
 
 DEFAULT_CHANNEL_ORDER_7_1_4 = CHANNEL_ORDER_7_1_4
@@ -234,7 +239,7 @@ def _load_json_object(path: Path) -> dict[str, Any]:
 def is_inference_bundle_payload(payload: dict[str, Any]) -> bool:
     if payload.get("model_type") == "spatial_dit":
         return True
-    return payload.get("bundle_kind") == "stereo2spatial_inference_bundle"
+    return payload.get("bundle_kind") == EXPORT_BUNDLE_KIND
 
 
 def load_inference_bundle_payload(path: str | Path) -> dict[str, Any]:
@@ -325,6 +330,9 @@ def build_train_config_from_bundle_payload(
         max_period=float(model_raw["max_period"]),
         num_memory_tokens=int(model_raw.get("num_memory_tokens", 0)),
         mix_style_dim=int(model_raw.get("mix_style_dim", 0)),
+        amplitude_gain_conditioning=bool(
+            model_raw.get("amplitude_gain_conditioning", False)
+        ),
         waveform_level_depth=int(model_raw.get("waveform_level_depth", 0)),
         waveform_micro_patch_size=int(model_raw.get("waveform_micro_patch_size", 16)),
         waveform_hidden_dim=int(model_raw.get("waveform_hidden_dim", 16)),
@@ -393,6 +401,21 @@ def build_train_config_from_bundle_payload(
             payload.get("solver_atol", DEFAULT_BUNDLE_SOLVER_ATOL),
         )
     )
+    runtime_seed = int(
+        inference_raw.get("seed", payload.get("seed", DEFAULT_BUNDLE_SEED))
+    )
+    runtime_flow_one_step = bool(
+        inference_raw.get(
+            "flow_one_step",
+            payload.get("flow_one_step", False),
+        )
+    )
+    runtime_flow_one_step_input = str(
+        inference_raw.get(
+            "flow_one_step_input",
+            payload.get("flow_one_step_input", "zeros"),
+        )
+    )
 
     data = DataConfig(
         dataset_root="",
@@ -430,6 +453,14 @@ def build_train_config_from_bundle_payload(
             None
             if data_raw.get("amplitude_lift_clip_value", 4.0) is None
             else float(data_raw.get("amplitude_lift_clip_value", 4.0))
+        ),
+        amplitude_lift_gain_power=float(
+            data_raw.get("amplitude_lift_gain_power", 1.0)
+        ),
+        amplitude_lift_gain_min_value=(
+            None
+            if data_raw.get("amplitude_lift_gain_min_value") is None
+            else float(data_raw["amplitude_lift_gain_min_value"])
         ),
         amplitude_lift_waveform_clamp=bool(
             data_raw.get("amplitude_lift_waveform_clamp", True)
@@ -496,7 +527,7 @@ def build_train_config_from_bundle_payload(
         validation_steps=0,
         run_validation_generations=False,
         num_valid_generations=0,
-        validation_generation_seed=0,
+        validation_generation_seed=runtime_seed,
         validation_generation_input_path=None,
         validation_generation_output_path=None,
         validation_generation_solver=runtime_solver,
@@ -510,6 +541,8 @@ def build_train_config_from_bundle_payload(
             if isinstance(audio_raw.get("channel_order"), list)
             else None
         ),
+        flow_one_step=runtime_flow_one_step,
+        flow_one_step_input=runtime_flow_one_step_input,
     )
 
     optimizer = OptimizerConfig(
@@ -531,7 +564,7 @@ def build_train_config_from_bundle_payload(
     )
 
     return TrainConfig(
-        seed=0,
+        seed=runtime_seed,
         output_dir=str(bundle_root) if bundle_root is not None else "",
         data=data,
         model=model,
@@ -561,6 +594,7 @@ def _build_runtime_model_config(model_config: dict[str, Any]) -> dict[str, Any]:
         "num_layers": int(model_config["num_layers"]),
         "num_heads": int(model_config["num_heads"]),
         "mlp_ratio": float(model_config["mlp_ratio"]),
+        "dropout": float(model_config.get("dropout", 0.0)),
         "timestep_embed_dim": int(model_config["timestep_embed_dim"]),
         "timestep_scale": float(model_config["timestep_scale"]),
         "max_period": float(model_config["max_period"]),
@@ -578,6 +612,9 @@ def _build_runtime_model_config(model_config: dict[str, Any]) -> dict[str, Any]:
         **common,
         "patch_size": int(model_config["patch_size"]),
         "mix_style_dim": int(model_config.get("mix_style_dim", 0)),
+        "amplitude_gain_conditioning": bool(
+            model_config.get("amplitude_gain_conditioning", False)
+        ),
         "waveform_level_depth": int(model_config.get("waveform_level_depth", 0)),
         "waveform_micro_patch_size": int(
             model_config.get("waveform_micro_patch_size", 16)
@@ -612,7 +649,10 @@ def _build_runtime_config(
     channel_order: list[str],
     sample_rate: int,
 ) -> dict[str, Any]:
+    target_channels = int(model_config["target_channels"])
     runtime_config: dict[str, Any] = {
+        "bundle_kind": EXPORT_BUNDLE_KIND,
+        "bundle_schema_version": EXPORT_BUNDLE_SCHEMA_VERSION,
         "model_type": "spatial_dit",
         "architectures": [
             "LegacySpatialDiT"
@@ -620,6 +660,9 @@ def _build_runtime_config(
             else "SpatialDiT"
         ],
         "sample_rate": int(sample_rate),
+        "output_kind": (
+            "direct_binaural" if target_channels == 2 else "speaker_layout"
+        ),
         "channel_layout": channel_layout_name,
         "channel_order": channel_order,
         "channel_mask": _resolve_channel_mask(channel_order),
@@ -638,6 +681,12 @@ def _build_runtime_config(
         "amplitude_lift_clip_value": data_config.get(
             "amplitude_lift_clip_value",
             4.0,
+        ),
+        "amplitude_lift_gain_power": float(
+            data_config.get("amplitude_lift_gain_power", 1.0)
+        ),
+        "amplitude_lift_gain_min_value": data_config.get(
+            "amplitude_lift_gain_min_value"
         ),
         "amplitude_lift_waveform_clamp": bool(
             data_config.get("amplitude_lift_waveform_clamp", True)
@@ -684,6 +733,14 @@ def _build_runtime_config(
                     "validation_generation_solver_atol", DEFAULT_BUNDLE_SOLVER_ATOL
                 )
             ),
+            "sampling_order": DEFAULT_BUNDLE_SAMPLING_ORDER,
+            "seed": int(
+                training_config.get("validation_generation_seed", DEFAULT_BUNDLE_SEED)
+            ),
+            "flow_one_step": bool(training_config.get("flow_one_step", False)),
+            "flow_one_step_input": str(
+                training_config.get("flow_one_step_input", "zeros")
+            ),
         },
         **model_config,
     }
@@ -692,30 +749,48 @@ def _build_runtime_config(
     return runtime_config
 
 
+def _default_channel_layout_name(target_channels: int) -> str:
+    if target_channels == 2:
+        return "binaural"
+    if target_channels == 6:
+        return "5.1 rear"
+    if target_channels == 12:
+        return "7.1.4"
+    return f"{target_channels}-channel"
+
+
 def export_model_bundle(
     *,
     train_run_dir: str | Path,
     checkpoint: str | Path,
     output_dir: str | Path,
     weights_source: str = "auto",
-    channel_layout_name: str = "7.1.4",
+    channel_layout_name: str | None = None,
     channel_order: list[str] | None = None,
     sample_rate: int | None = None,
     include_vae: bool | None = None,
     vae_checkpoint_path: str | Path | None = None,
     vae_config_path: str | Path | None = None,
+    config_path: str | Path | None = None,
 ) -> ExportBundleResult:
     """Export a training checkpoint into an inference-ready model bundle."""
     run_dir = Path(train_run_dir).resolve()
     checkpoint_path = resolve_export_checkpoint_path(run_dir, checkpoint).resolve()
-    resolved_config_path = run_dir / "resolved_config.json"
+    resolved_config_path = (
+        Path(config_path).resolve()
+        if config_path is not None
+        else run_dir / "resolved_config.json"
+    )
     if not resolved_config_path.exists():
         raise FileNotFoundError(
             f"Resolved training config not found: {resolved_config_path}"
         )
 
-    with open(resolved_config_path, encoding="utf-8") as handle:
-        training_config = json.load(handle)
+    if resolved_config_path.suffix.lower() == ".json":
+        with open(resolved_config_path, encoding="utf-8") as handle:
+            training_config = json.load(handle)
+    else:
+        training_config = asdict(load_config(resolved_config_path))
     if not isinstance(training_config, dict):
         raise TypeError(
             f"Expected JSON object in resolved config: {resolved_config_path}"
@@ -732,8 +807,15 @@ def export_model_bundle(
         raise TypeError("resolved_config.json is missing object section 'training'")
 
     target_channels = int(model_config["target_channels"])
+    resolved_channel_layout_name = (
+        _default_channel_layout_name(target_channels)
+        if channel_layout_name is None
+        else str(channel_layout_name).strip()
+    )
+    if not resolved_channel_layout_name:
+        raise ValueError("channel_layout_name cannot be empty")
     resolved_channel_order = list(
-        channel_labels_for_layout(channel_layout_name, target_channels)
+        channel_labels_for_layout(resolved_channel_layout_name, target_channels)
         if channel_order is None
         else channel_order
     )
@@ -817,7 +899,7 @@ def export_model_bundle(
         model_config=runtime_model_config,
         data_config=data_config,
         training_config=raw_training_config,
-        channel_layout_name=channel_layout_name,
+        channel_layout_name=resolved_channel_layout_name,
         channel_order=resolved_channel_order,
         sample_rate=resolved_sample_rate,
     )

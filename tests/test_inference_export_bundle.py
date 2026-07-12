@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import yaml
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 
@@ -20,6 +21,11 @@ from stereo2spatial.cli.infer import (
 )
 from stereo2spatial.inference.export_bundle import (
     EXPORT_BUNDLE_CONFIG_FILENAME,
+    EXPORT_BUNDLE_KIND,
+    EXPORT_BUNDLE_SCHEMA_VERSION,
+    EXPORT_BUNDLE_VAE_CONFIG_FILENAME,
+    EXPORT_BUNDLE_VAE_DIRNAME,
+    EXPORT_BUNDLE_VAE_WEIGHTS_FILENAME,
     EXPORT_BUNDLE_WEIGHTS_FILENAME,
     build_train_config_from_bundle_payload,
     export_model_bundle,
@@ -242,6 +248,32 @@ def test_export_model_bundle_prefers_ema_state_when_available(tmp_path: Path) ->
     assert torch.allclose(exported_state["linear.bias"], ema_model.linear.bias)
 
 
+def test_export_model_bundle_accepts_explicit_training_yaml(tmp_path: Path) -> None:
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=2,
+        student_state={"linear.weight": torch.zeros((1, 1))},
+    )
+    override = _resolved_config_payload(
+        output_dir=str(run_dir.as_posix()),
+        target_channels=6,
+    )
+    config_path = tmp_path / "export_config.yaml"
+    config_path.write_text(yaml.safe_dump(override), encoding="utf-8")
+    output_dir = tmp_path / "bundle"
+
+    export_model_bundle(
+        train_run_dir=run_dir,
+        checkpoint="latest",
+        output_dir=output_dir,
+        config_path=config_path,
+    )
+
+    payload = load_inference_bundle_payload(output_dir / "config.json")
+    assert payload["target_channels"] == 6
+    assert payload["channel_layout"] == "5.1 rear"
+
+
 def test_legacy_export_round_trips_latent_fps(tmp_path: Path) -> None:
     run_dir, _ = _write_training_run(
         tmp_path,
@@ -264,6 +296,179 @@ def test_legacy_export_round_trips_latent_fps(tmp_path: Path) -> None:
     assert payload["latent_fps"] == 37.5
     config = build_train_config_from_bundle_payload(payload, bundle_root=output_dir)
     assert config.data.latent_fps == 37.5
+
+    legacy_payload = dict(payload)
+    legacy_payload.pop("bundle_kind")
+    legacy_payload.pop("bundle_schema_version")
+    legacy_payload.pop("architecture")
+    legacy_payload.pop("output_kind")
+    legacy_config = build_train_config_from_bundle_payload(legacy_payload)
+    assert legacy_config.model.architecture == "legacy_vae"
+    assert legacy_config.model.latent_dim == 64
+
+
+def test_export_emits_versioned_waveform_contract_and_round_trips_runtime_fields(
+    tmp_path: Path,
+) -> None:
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=2,
+        student_state={"linear.weight": torch.zeros((1, 1))},
+    )
+    config_path = run_dir / "resolved_config.json"
+    resolved = json.loads(config_path.read_text(encoding="utf-8"))
+    resolved["model"].update(
+        {
+            "architecture": "waveform",
+            "dropout": 0.125,
+            "mix_style_dim": 10,
+            "amplitude_gain_conditioning": True,
+        }
+    )
+    resolved["data"].update(
+        {
+            "amplitude_lift_enabled": True,
+            "amplitude_lift_mode": "wavflow",
+            "amplitude_lift_gain_power": 1.75,
+            "amplitude_lift_gain_min_value": 0.25,
+        }
+    )
+    resolved["training"].update(
+        {
+            "validation_generation_seed": 4242,
+            "flow_one_step": True,
+            "flow_one_step_input": "cond",
+        }
+    )
+    config_path.write_text(json.dumps(resolved), encoding="utf-8")
+    output_dir = tmp_path / "bundle"
+
+    export_model_bundle(
+        train_run_dir=run_dir,
+        checkpoint="latest",
+        output_dir=output_dir,
+    )
+
+    payload = load_inference_bundle_payload(output_dir / "config.json")
+    assert payload["bundle_kind"] == EXPORT_BUNDLE_KIND
+    assert payload["bundle_schema_version"] == EXPORT_BUNDLE_SCHEMA_VERSION
+    assert payload["architecture"] == "waveform"
+    assert payload["architectures"] == ["SpatialDiT"]
+    assert payload["output_kind"] == "direct_binaural"
+    assert payload["channel_layout"] == "binaural"
+    assert payload["channel_order"] == ["FL", "FR"]
+    assert payload["channel_mask"] == 0x3
+    assert payload["dropout"] == pytest.approx(0.125)
+    assert payload["mix_style_dim"] == 10
+    assert "mix_style_presets" not in payload
+    assert "mix_style_names" not in payload
+    assert payload["amplitude_gain_conditioning"] is True
+    assert payload["amplitude_lift_gain_power"] == pytest.approx(1.75)
+    assert payload["amplitude_lift_gain_min_value"] == pytest.approx(0.25)
+    assert payload["inference"]["sampling_order"] == "timestep_major"
+    assert payload["inference"]["seed"] == 4242
+    assert payload["inference"]["flow_one_step"] is True
+    assert payload["inference"]["flow_one_step_input"] == "cond"
+    assert not (output_dir / EXPORT_BUNDLE_VAE_DIRNAME).exists()
+
+    runtime = build_train_config_from_bundle_payload(payload, bundle_root=output_dir)
+    assert runtime.seed == 4242
+    assert runtime.model.architecture == "waveform"
+    assert runtime.model.dropout == pytest.approx(0.125)
+    assert runtime.model.amplitude_gain_conditioning is True
+    assert runtime.data.amplitude_lift_gain_power == pytest.approx(1.75)
+    assert runtime.data.amplitude_lift_gain_min_value == pytest.approx(0.25)
+    assert runtime.training.validation_generation_seed == 4242
+    assert runtime.training.flow_one_step is True
+    assert runtime.training.flow_one_step_input == "cond"
+
+
+@pytest.mark.parametrize(
+    ("target_channels", "expected_layout", "expected_order"),
+    [
+        (6, "5.1 rear", ["FL", "FR", "FC", "LFE", "BL", "BR"]),
+        (
+            12,
+            "7.1.4",
+            [
+                "FL",
+                "FR",
+                "FC",
+                "LFE",
+                "BL",
+                "BR",
+                "SL",
+                "SR",
+                "TFL",
+                "TFR",
+                "TBL",
+                "TBR",
+            ],
+        ),
+    ],
+)
+def test_export_resolves_default_speaker_layout_from_target_channels(
+    tmp_path: Path,
+    target_channels: int,
+    expected_layout: str,
+    expected_order: list[str],
+) -> None:
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=target_channels,
+        student_state={"linear.weight": torch.zeros((1, 1))},
+    )
+    output_dir = tmp_path / f"bundle_{target_channels}"
+
+    export_model_bundle(
+        train_run_dir=run_dir,
+        checkpoint="latest",
+        output_dir=output_dir,
+    )
+
+    payload = load_inference_bundle_payload(output_dir / "config.json")
+    assert payload["output_kind"] == "speaker_layout"
+    assert payload["channel_layout"] == expected_layout
+    assert payload["channel_order"] == expected_order
+
+
+def test_legacy_export_keeps_fixed_vae_bundle_contract(tmp_path: Path) -> None:
+    run_dir, _ = _write_training_run(
+        tmp_path,
+        target_channels=12,
+        student_state={"linear.weight": torch.zeros((1, 1))},
+    )
+    _rewrite_run_as_legacy(run_dir)
+    vae_weights = tmp_path / "source_vae.pyt"
+    vae_config = tmp_path / "source_vae.json"
+    vae_weights.write_bytes(b"weights")
+    vae_config.write_text("{}", encoding="utf-8")
+    output_dir = tmp_path / "legacy_bundle"
+
+    export_model_bundle(
+        train_run_dir=run_dir,
+        checkpoint="latest",
+        output_dir=output_dir,
+        vae_checkpoint_path=vae_weights,
+        vae_config_path=vae_config,
+    )
+
+    payload = load_inference_bundle_payload(output_dir / "config.json")
+    assert payload["bundle_kind"] == EXPORT_BUNDLE_KIND
+    assert payload["bundle_schema_version"] == EXPORT_BUNDLE_SCHEMA_VERSION
+    assert payload["architecture"] == "legacy_vae"
+    assert payload["architectures"] == ["LegacySpatialDiT"]
+    assert payload["output_kind"] == "speaker_layout"
+    assert payload["channel_layout"] == "7.1.4"
+    assert payload["latent_dim"] == 64
+    assert "patch_size" not in payload
+    assert payload["sample_rate"] == 48_000
+    assert (
+        output_dir / EXPORT_BUNDLE_VAE_DIRNAME / EXPORT_BUNDLE_VAE_WEIGHTS_FILENAME
+    ).read_bytes() == b"weights"
+    assert (
+        output_dir / EXPORT_BUNDLE_VAE_DIRNAME / EXPORT_BUNDLE_VAE_CONFIG_FILENAME
+    ).read_text(encoding="utf-8") == "{}"
 
 
 def test_export_preserves_training_aligned_inference_recommendations(
@@ -308,6 +513,10 @@ def test_export_preserves_training_aligned_inference_recommendations(
         "solver_steps": 48,
         "solver_rtol": 2.0e-5,
         "solver_atol": 3.0e-5,
+        "sampling_order": "timestep_major",
+        "seed": 1337,
+        "flow_one_step": False,
+        "flow_one_step_input": "zeros",
     }
     runtime = build_train_config_from_bundle_payload(payload)
     assert runtime.data.segment_seconds == pytest.approx(7.5)

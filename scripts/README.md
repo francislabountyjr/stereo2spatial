@@ -49,6 +49,8 @@ workflow tooling around that core package.
     - `config.json`
     - `model.safetensors`
     - optional `vae/` assets for the v1-compatible architecture
+  - Record a versioned architecture/output contract and timestep-major inference defaults
+  - Infer the default output layout from target channels (2=binaural, 6=5.1 rear, 12=7.1.4)
   - This is the recommended format for local inference and Hugging Face upload
 
 Example:
@@ -56,6 +58,11 @@ Example:
 ```bash
 python scripts/export/export_model_bundle.py --train-run-dir runs/train_with_gan --checkpoint latest --output-dir exports/stereo2spatial-waveform
 ```
+
+By default, the exporter reads `<train-run-dir>/resolved_config.json`. Override
+that source with either `--config path/to/resolved_config.json` or
+`--config path/to/train.yaml`, including when a checkpoint has been moved away
+from its original run directory.
 
 You can then infer directly from that exported bundle:
 

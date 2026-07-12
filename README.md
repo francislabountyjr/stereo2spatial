@@ -8,7 +8,7 @@ The repository supports two model architectures:
 
 | Architecture | Config value | Representation | Checkpoints |
 | --- | --- | --- | --- |
-| Waveform (default) | `waveform` | Raw waveform patches | No-VAE/waveform checkpoints |
+| Waveform (default) | `waveform` | Raw waveform patches | V2 waveform checkpoints |
 | EAR-VAE latent (v1) | `legacy_vae` | EAR-VAE latents | v1 latent checkpoints |
 
 The v1 architecture preserves its checkpoint parameter layout so existing models
@@ -69,9 +69,17 @@ python infer.py \
   --device cuda
 ```
 
-The exported bundle contains `config.json` and `model.safetensors`. Export with
-`--weights-source auto` to prefer EMA when the source checkpoint contains it;
-the selected state is the one written to the bundle.
+The exported bundle contains `config.json` and `model.safetensors`. Its versioned
+metadata identifies the architecture, output kind, channel layout, preprocessing,
+and recommended inference defaults. Output layout defaults from the model channel
+count: two-channel models are direct binaural, six-channel models are 5.1 rear,
+and twelve-channel models are 7.1.4. Export with `--weights-source auto` to prefer
+EMA when the source checkpoint contains it; the selected state is the one written
+to the bundle. By default, export reads
+`<train-run-dir>/resolved_config.json`. Use
+`--config path/to/resolved_config.json` or `--config path/to/train.yaml` to
+override that source, including when a checkpoint has been moved away from its
+original run directory.
 
 ## Using v1 EAR-VAE Models
 

@@ -250,8 +250,16 @@ model.safetensors
 ```
 
 Self-contained v1 bundles also contain the 48 kHz EAR-VAE assets under `vae/`.
-Bundle metadata records architecture, representation dimensions, output layout,
-sample rate, window/overlap, and validation-generation solver recommendations.
+Versioned bundle metadata records architecture, representation dimensions, direct
+binaural versus speaker-layout output, sample rate, preprocessing, window/overlap,
+sampling order, seed, and validation-generation solver recommendations. Default
+layouts are inferred from target channels: 2 is binaural, 6 is 5.1 rear, and 12 is
+7.1.4.
+
+For mix-style conditioning, the bundle records only the factual
+`mix_style_dim` capability. Preset definitions and control-name schemas are not
+exported; the consuming app or UI owns their presentation and maps known model
+capabilities to its controls.
 
 The supported application runtime is PyTorch/CUDA. Export selects one EMA or
 student state and writes it to `model.safetensors`; raw Accelerate checkpoints

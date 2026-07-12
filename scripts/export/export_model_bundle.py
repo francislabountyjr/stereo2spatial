@@ -35,6 +35,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "Optional resolved JSON or training YAML config. Defaults to "
+            "<train-run-dir>/resolved_config.json."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         required=True,
@@ -48,8 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--channel-layout-name",
-        default="7.1.4",
-        help="Human-readable output layout name for bundle metadata.",
+        default=None,
+        help=(
+            "Human-readable output layout name for bundle metadata. Defaults from "
+            "the target channel count: 2=binaural, 6=5.1 rear, 12=7.1.4."
+        ),
     )
     parser.add_argument(
         "--channel-order",
@@ -96,6 +108,7 @@ def main() -> None:
         include_vae=args.include_vae,
         vae_checkpoint_path=args.vae_checkpoint_path,
         vae_config_path=args.vae_config_path,
+        config_path=args.config,
     )
 
     print("Export complete:")
