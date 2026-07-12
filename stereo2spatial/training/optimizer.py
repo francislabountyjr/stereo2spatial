@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast, overload
 
 import torch
 
@@ -136,7 +137,7 @@ def _orthogonalize_newton_schulz(
 
     if transposed:
         x = x.transpose(0, 1)
-    return x.reshape(original_shape).to(dtype=update.dtype)
+    return cast(torch.Tensor, x.reshape(original_shape).to(dtype=update.dtype))
 
 
 class Muon(torch.optim.Optimizer):
@@ -169,8 +170,14 @@ class Muon(torch.optim.Optimizer):
         }
         super().__init__(params, defaults)
 
+    @overload
+    def step(self, closure: None = None) -> None: ...
+
+    @overload
+    def step(self, closure: Callable[[], float]) -> float: ...
+
     @torch.no_grad()
-    def step(self, closure: Any | None = None) -> Any | None:
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
         """Perform one optimization step."""
         loss = None
         if closure is not None:

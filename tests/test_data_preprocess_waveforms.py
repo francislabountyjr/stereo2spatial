@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import soundfile as sf
@@ -38,7 +39,18 @@ def test_align_signal_lengths_trims_to_shortest_sample_count() -> None:
         source_downmix_signal=downmix,
     )
 
-    assert [tensor.shape[-1] for tensor in aligned] == [4, 4, 4, 4]
+    target_aligned, stereo_aligned, mono_aligned, downmix_aligned = aligned
+    assert mono_aligned is not None
+    assert downmix_aligned is not None
+    assert [
+        tensor.shape[-1]
+        for tensor in (
+            target_aligned,
+            stereo_aligned,
+            mono_aligned,
+            downmix_aligned,
+        )
+    ] == [4, 4, 4, 4]
 
 
 def test_duplicate_mono_to_stereo_width_matches_default_condition_channels() -> None:
@@ -51,7 +63,7 @@ def test_duplicate_mono_to_stereo_width_matches_default_condition_channels() -> 
     assert torch.equal(stereo_width[1], mono[0])
 
 
-def test_split_sample_artifacts_exist_uses_signal_filenames(tmp_path) -> None:
+def test_split_sample_artifacts_exist_uses_signal_filenames(tmp_path: Path) -> None:
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir()
     for filename in [
@@ -74,7 +86,7 @@ def test_split_sample_artifacts_exist_uses_signal_filenames(tmp_path) -> None:
 
 
 def test_split_sample_artifacts_exist_allows_optional_mono_and_downmix(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir()
@@ -95,7 +107,9 @@ def test_split_sample_artifacts_exist_allows_optional_mono_and_downmix(
     )
 
 
-def test_flac_sample_artifacts_exist_allows_optional_mono_and_downmix(tmp_path) -> None:
+def test_flac_sample_artifacts_exist_allows_optional_mono_and_downmix(
+    tmp_path: Path,
+) -> None:
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir()
     for filename in [
@@ -115,7 +129,7 @@ def test_flac_sample_artifacts_exist_allows_optional_mono_and_downmix(tmp_path) 
     )
 
 
-def test_convert_rejects_signal_length_mismatch(tmp_path) -> None:
+def test_convert_rejects_signal_length_mismatch(tmp_path: Path) -> None:
     signals = {
         "target_signal": torch.zeros(2, 12),
         "source_stereo_signal": torch.zeros(2, 10),
@@ -125,7 +139,7 @@ def test_convert_rejects_signal_length_mismatch(tmp_path) -> None:
         _matching_lengths_or_raise(signals, tmp_path / "sample")
 
 
-def test_invalid_sample_scan_flags_zero_byte_flac(tmp_path) -> None:
+def test_invalid_sample_scan_flags_zero_byte_flac(tmp_path: Path) -> None:
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir()
     (sample_dir / "metadata.json").write_text(
@@ -151,7 +165,7 @@ def test_invalid_sample_scan_flags_zero_byte_flac(tmp_path) -> None:
     assert any("target_signal_flac_invalid" in row.tensor_name for row in rows)
 
 
-def test_invalid_sample_scan_flags_flac_length_mismatch(tmp_path) -> None:
+def test_invalid_sample_scan_flags_flac_length_mismatch(tmp_path: Path) -> None:
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir()
     (sample_dir / "metadata.json").write_text(
@@ -184,7 +198,7 @@ def test_invalid_sample_scan_flags_flac_length_mismatch(tmp_path) -> None:
 
 
 def test_convert_to_flac_resumes_existing_valid_output_without_source_tensors(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     input_root = tmp_path / "input"
     output_root = tmp_path / "output"

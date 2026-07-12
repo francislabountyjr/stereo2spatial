@@ -523,14 +523,19 @@ def forward_window(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run one model forward with optional recurrent memory handling."""
     if mem is None:
-        kwargs = {"zt": zt_w, "t": t, "z_cond": zc_w, "valid_mask": vm_w}
+        kwargs: dict[str, object] = {
+            "zt": zt_w,
+            "t": t,
+            "z_cond": zc_w,
+            "valid_mask": vm_w,
+        }
         if mix_style is not None:
             kwargs["mix_style"] = mix_style
         if mix_style_mask is not None:
             kwargs["mix_style_mask"] = mix_style_mask
         if amplitude_gain is not None:
             kwargs["amplitude_gain"] = amplitude_gain
-        pred = model(**kwargs)
+        pred = cast(torch.Tensor, model(**kwargs))
         return pred, None
 
     kwargs = {
@@ -547,7 +552,7 @@ def forward_window(
         kwargs["mix_style_mask"] = mix_style_mask
     if amplitude_gain is not None:
         kwargs["amplitude_gain"] = amplitude_gain
-    pred, mem = model(**kwargs)
+    pred, mem = cast(tuple[torch.Tensor, torch.Tensor], model(**kwargs))
     if detach_memory:
         mem = mem.detach()
     return pred, mem

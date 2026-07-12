@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -214,7 +215,10 @@ def _print_mix_style_presets() -> None:
         _safe_print(f"    {knobs}")
 
 
-def _write_report_json_atomic(report_json_path: Path, report: dict[str, Any]) -> None:
+def _write_report_json_atomic(
+    report_json_path: Path,
+    report: Mapping[str, object],
+) -> None:
     """Write a report JSON without exposing partially-written final files."""
     report_json_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = report_json_path.with_name(
@@ -222,7 +226,7 @@ def _write_report_json_atomic(report_json_path: Path, report: dict[str, Any]) ->
     )
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(report, handle, indent=2, ensure_ascii=True)
+            json.dump(dict(report), handle, indent=2, ensure_ascii=True)
         tmp_path.replace(report_json_path)
     except Exception:
         tmp_path.unlink(missing_ok=True)

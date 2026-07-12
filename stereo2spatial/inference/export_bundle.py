@@ -7,7 +7,7 @@ import re
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import torch
 from safetensors.torch import load_file as load_safetensors_file
@@ -225,7 +225,7 @@ def resolve_inference_config_path(checkpoint: str | Path) -> Path | None:
 
 
 def _resolve_channel_mask(channel_order: list[str]) -> int | None:
-    return cast(int | None, channel_mask_for_order(channel_order))
+    return channel_mask_for_order(channel_order)
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:

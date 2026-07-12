@@ -391,8 +391,10 @@ def test_generate_spatial_signal_shares_overlap_noise_and_zero_pads_tail(
     assert torch.count_nonzero(captured_z0[2][..., 2:]).item() == 0
     assert captured_masks[0] is None
     assert captured_masks[1] is None
+    tail_mask = captured_masks[2]
+    assert tail_mask is not None
     assert torch.equal(
-        captured_masks[2],
+        tail_mask,
         torch.tensor([[True, True, False, False]]),
     )
 

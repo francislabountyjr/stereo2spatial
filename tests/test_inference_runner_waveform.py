@@ -10,6 +10,7 @@ from stereo2spatial.inference.audio import (
     write_audio_channels_first,
 )
 from stereo2spatial.inference.runner import (
+    RequestedSolverName,
     _patch_audio,
     _prepare_conditioning_audio,
     _resolve_inference_mix_style,
@@ -171,7 +172,9 @@ def test_resolve_inference_solver_accepts_res6s_aliases() -> None:
 
 
 @pytest.mark.parametrize("solver", ["midpoint", "midpoint_rk2", "midpoint-rk2", "rk2"])
-def test_resolve_inference_solver_accepts_midpoint_rk2_aliases(solver: str) -> None:
+def test_resolve_inference_solver_accepts_midpoint_rk2_aliases(
+    solver: RequestedSolverName,
+) -> None:
     assert _resolve_inference_solver(requested_solver=solver) == "midpoint_rk2"
 
 

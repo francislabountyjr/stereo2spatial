@@ -321,7 +321,10 @@ class LegacySpatialDiT(nn.Module):
         else:
             x_tokens = x_all
 
-        velocity_tokens = self.final_proj(self.final_norm(x_tokens))
+        velocity_tokens = cast(
+            torch.Tensor,
+            self.final_proj(self.final_norm(x_tokens)),
+        )
         if frame_keep_mask is not None:
             velocity_tokens = (
                 velocity_tokens * frame_keep_mask.to(velocity_tokens.dtype)[:, :, None]

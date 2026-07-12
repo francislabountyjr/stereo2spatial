@@ -9,7 +9,7 @@ import torch
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
-from stereo2spatial.modeling import is_legacy_vae_model
+from stereo2spatial.modeling import SpatialModel, is_legacy_vae_model
 
 from .config import TrainConfig
 from .dataset import WaveformSongDataset
@@ -283,10 +283,11 @@ def _run_generation_validation(
     if not audio_paths:
         return 0, 0
 
-    raw_model = (
+    raw_model = cast(
+        SpatialModel,
         ema_teacher.model
         if ema_teacher is not None
-        else accelerator.unwrap_model(model)
+        else accelerator.unwrap_model(model),
     )
     was_training = raw_model.training
     raw_model.eval()

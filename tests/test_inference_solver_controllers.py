@@ -79,7 +79,7 @@ class _ConstantVelocityPredictor(torch.nn.Module):
 
 def _run_controller(
     controller: FixedStepSolverController,
-    model: _CleanPredictor,
+    model: _CleanPredictor | _ConstantVelocityPredictor,
 ) -> torch.Tensor:
     while not controller.is_done:
         query = controller.next_query()

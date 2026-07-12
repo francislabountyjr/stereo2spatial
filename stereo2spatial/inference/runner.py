@@ -333,7 +333,7 @@ def build_inference_session(
             raise RuntimeError("torch.compile is unavailable in this PyTorch build.")
         resolved_compile_mode = str(compile_mode).strip().lower()
         model = cast(
-            torch.nn.Module,
+            SpatialModel,
             torch.compile(model, mode=resolved_compile_mode),
         )
         compiled = True
@@ -585,7 +585,7 @@ def run_inference_with_session(
     )
 
     pred_signal = sampler(
-        model=model,
+        model=cast(SpatialModel, model),
         cond_signal=cond_signal.to(run_device, dtype=run_dtype),
         chunk_frames=chunk_frames,
         overlap_frames=overlap_frames,
@@ -770,29 +770,26 @@ def run_inference(
         vae_checkpoint_path=vae_checkpoint_path,
         vae_config_path=vae_config_path,
     )
-    return cast(
-        InferenceReport,
-        run_inference_with_session(
-            session=session,
-            input_audio_path=input_audio_path,
-            output_audio_path=output_audio_path,
-            sample_rate=sample_rate,
-            chunk_seconds=chunk_seconds,
-            overlap_seconds=overlap_seconds,
-            solver=solver,
-            solver_steps=solver_steps,
-            solver_rtol=solver_rtol,
-            solver_atol=solver_atol,
-            seed=seed,
-            show_progress=show_progress,
-            normalize_peak=normalize_peak,
-            mix_style=mix_style,
-            mix_style_preset=mix_style_preset,
-            encode_chunk_size_samples=encode_chunk_size_samples,
-            encode_overlap_samples=encode_overlap_samples,
-            decode_chunk_size_frames=decode_chunk_size_frames,
-            decode_overlap_frames=decode_overlap_frames,
-            disable_chunked_decode=disable_chunked_decode,
-            sampling_order=sampling_order,
-        ),
+    return run_inference_with_session(
+        session=session,
+        input_audio_path=input_audio_path,
+        output_audio_path=output_audio_path,
+        sample_rate=sample_rate,
+        chunk_seconds=chunk_seconds,
+        overlap_seconds=overlap_seconds,
+        solver=solver,
+        solver_steps=solver_steps,
+        solver_rtol=solver_rtol,
+        solver_atol=solver_atol,
+        seed=seed,
+        show_progress=show_progress,
+        normalize_peak=normalize_peak,
+        mix_style=mix_style,
+        mix_style_preset=mix_style_preset,
+        encode_chunk_size_samples=encode_chunk_size_samples,
+        encode_overlap_samples=encode_overlap_samples,
+        decode_chunk_size_frames=decode_chunk_size_frames,
+        decode_overlap_frames=decode_overlap_frames,
+        disable_chunked_decode=disable_chunked_decode,
+        sampling_order=sampling_order,
     )

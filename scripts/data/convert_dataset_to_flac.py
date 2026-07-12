@@ -53,7 +53,10 @@ def _sample_dirs(dataset_root: Path) -> list[Path]:
 
 def _read_metadata(sample_dir: Path) -> dict[str, Any]:
     metadata_path = sample_dir / METADATA_FILENAME
-    return json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload: object = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError(f"Metadata must be a JSON object: {metadata_path}")
+    return {str(key): value for key, value in payload.items()}
 
 
 def _write_flac(path: Path, signal: torch.Tensor, sample_rate: int) -> None:

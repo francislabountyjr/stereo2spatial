@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -166,7 +167,7 @@ def stack_model_queries(queries: list[ModelQuery]) -> dict[str, Any]:
     ):
         raise ValueError("all queries must agree on conditioning_cache presence")
 
-    batch = {
+    batch: dict[str, object] = {
         "zt": torch.cat([query.zt for query in queries], dim=0),
         "z_cond": torch.cat([query.z_cond for query in queries], dim=0),
         "t": torch.tensor(
@@ -204,7 +205,7 @@ def stack_model_queries(queries: list[ModelQuery]) -> dict[str, Any]:
     if first.conditioning_cache is not None:
         batch["conditioning_cache"] = _stack_conditioning_caches(
             [
-                cast(dict[str, object], query.conditioning_cache)
+                query.conditioning_cache
                 for query in queries
                 if query.conditioning_cache is not None
             ]
@@ -237,7 +238,7 @@ def _stack_optional_rope(
 
 
 def _stack_tensor_dicts(
-    items: list[dict[str, torch.Tensor]],
+    items: Sequence[dict[str, torch.Tensor]],
 ) -> dict[str, torch.Tensor]:
     keys = set(items[0])
     if any(set(item) != keys for item in items):

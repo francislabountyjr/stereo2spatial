@@ -144,27 +144,31 @@ class SpatialDiT(nn.Module):
             nn.SiLU(),
             nn.Linear(self.hidden_dim * 4, self.hidden_dim),
         )
-        self.mix_style_mlp: nn.Module | None
+        self.mix_style_mlp: nn.Sequential | None
         if self.mix_style_dim > 0:
             self.mix_style_mlp = nn.Sequential(
                 nn.Linear(self.mix_style_dim, self.hidden_dim * 4),
                 nn.SiLU(),
                 nn.Linear(self.hidden_dim * 4, self.hidden_dim),
             )
-            nn.init.zeros_(self.mix_style_mlp[-1].weight)
-            nn.init.zeros_(self.mix_style_mlp[-1].bias)
+            mix_style_output = self.mix_style_mlp[-1]
+            assert isinstance(mix_style_output, nn.Linear)
+            nn.init.zeros_(mix_style_output.weight)
+            nn.init.zeros_(mix_style_output.bias)
         else:
             self.mix_style_mlp = None
 
-        self.amplitude_gain_mlp: nn.Module | None
+        self.amplitude_gain_mlp: nn.Sequential | None
         if self.amplitude_gain_conditioning:
             self.amplitude_gain_mlp = nn.Sequential(
                 nn.Linear(1, self.hidden_dim * 4),
                 nn.SiLU(),
                 nn.Linear(self.hidden_dim * 4, self.hidden_dim),
             )
-            nn.init.zeros_(self.amplitude_gain_mlp[-1].weight)
-            nn.init.zeros_(self.amplitude_gain_mlp[-1].bias)
+            amplitude_gain_output = self.amplitude_gain_mlp[-1]
+            assert isinstance(amplitude_gain_output, nn.Linear)
+            nn.init.zeros_(amplitude_gain_output.weight)
+            nn.init.zeros_(amplitude_gain_output.bias)
         else:
             self.amplitude_gain_mlp = None
 
@@ -194,12 +198,16 @@ class SpatialDiT(nn.Module):
         )
         waveform_micro_dim = self.target_channels * self.waveform_micro_patch_size
         waveform_cond_micro_dim = self.cond_channels * self.waveform_micro_patch_size
+        self.waveform_in: nn.Linear | None
+        self.waveform_cond_in: nn.Linear | None
+        self.waveform_norm: RMSNorm | None
+        self.waveform_out: nn.Linear | None
         if self.waveform_level_depth > 0:
-            self.waveform_in: nn.Module | None = nn.Linear(
+            self.waveform_in = nn.Linear(
                 waveform_micro_dim,
                 self.waveform_hidden_dim,
             )
-            self.waveform_cond_in: nn.Module | None = nn.Linear(
+            self.waveform_cond_in = nn.Linear(
                 waveform_cond_micro_dim,
                 self.waveform_hidden_dim,
             )
@@ -216,13 +224,13 @@ class SpatialDiT(nn.Module):
                     for _ in range(self.waveform_level_depth)
                 ]
             )
-            self.waveform_norm: nn.Module | None = RMSNorm(self.waveform_hidden_dim)
-            self.waveform_out: nn.Module | None = nn.Linear(
+            self.waveform_norm = RMSNorm(self.waveform_hidden_dim)
+            self.waveform_out = nn.Linear(
                 self.waveform_hidden_dim,
                 waveform_micro_dim,
             )
-            nn.init.normal_(cast(nn.Linear, self.waveform_out).weight, std=1.0e-3)
-            nn.init.zeros_(cast(nn.Linear, self.waveform_out).bias)
+            nn.init.normal_(self.waveform_out.weight, std=1.0e-3)
+            nn.init.zeros_(self.waveform_out.bias)
         else:
             self.waveform_in = None
             self.waveform_cond_in = None
@@ -458,7 +466,7 @@ class SpatialDiT(nn.Module):
             )
             .contiguous()
         )
-        waveform_tokens = cast(nn.Linear, self.waveform_in)(micro)
+        waveform_tokens = cast(torch.Tensor, self.waveform_in(micro))
         if conditioning_cache is None:
             cond_micro = (
                 z_cond.permute(0, 3, 2, 1)
@@ -470,7 +478,7 @@ class SpatialDiT(nn.Module):
                 )
                 .contiguous()
             )
-            cond_waveform_tokens = cast(nn.Linear, self.waveform_cond_in)(cond_micro)
+            cond_waveform_tokens = cast(torch.Tensor, self.waveform_cond_in(cond_micro))
             waveform_block_caches = None
         else:
             cond_waveform_tokens = cast(
@@ -522,8 +530,9 @@ class SpatialDiT(nn.Module):
                     conditioning_cache=waveform_block_cache,
                 )
 
-        residual_micro = cast(nn.Linear, self.waveform_out)(
-            cast(RMSNorm, self.waveform_norm)(waveform_tokens)
+        residual_micro = cast(
+            torch.Tensor,
+            self.waveform_out(self.waveform_norm(waveform_tokens)),
         )
         residual_tokens = (
             residual_micro.reshape(
@@ -622,7 +631,10 @@ class SpatialDiT(nn.Module):
                 )
                 .contiguous()
             )
-            cond_waveform_tokens = cast(nn.Linear, self.waveform_cond_in)(cond_micro)
+            cond_waveform_tokens = cast(
+                torch.Tensor,
+                self.waveform_cond_in(cond_micro),
+            )
             waveform_rope_self = rope_x
             waveform_rope_frames = rope_frames
             waveform_head_dim = self.hidden_dim // self.waveform_num_heads
@@ -931,13 +943,12 @@ class SpatialDiT(nn.Module):
                 clean_tokens * frame_keep_mask.to(clean_tokens.dtype)[:, :, None]
             )
 
-        clean_prediction = cast(
-            torch.Tensor,
+        clean_prediction = (
             clean_tokens.reshape(
                 batch_size, num_frames, self.target_channels, self.patch_size
             )
             .permute(0, 2, 3, 1)
-            .contiguous(),
+            .contiguous()
         )
 
         if return_mem:

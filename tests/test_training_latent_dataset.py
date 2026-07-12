@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from stereo2spatial.modeling import LegacySpatialDiT
 from stereo2spatial.training.components import build_training_components
 from stereo2spatial.training.config import load_config
 from stereo2spatial.training.dataset_types import ConditioningSource
@@ -346,6 +347,7 @@ def test_legacy_training_components_complete_backward_and_optimizer_step(
     config.optimizer.adamw_fused = False
 
     dataset, model, optimizer = build_training_components(config)
+    assert isinstance(model, LegacySpatialDiT)
     sample = dataset[0]
     target = sample["target_signal"].unsqueeze(0)
     conditioning = sample["cond_signal"].unsqueeze(0)
@@ -362,5 +364,5 @@ def test_legacy_training_components_complete_backward_and_optimizer_step(
     )
     loss = (prediction - target).square().mean()
     loss.backward()
-    assert model.final_proj.weight.grad is not None  # type: ignore[attr-defined]
+    assert model.final_proj.weight.grad is not None
     optimizer.step()

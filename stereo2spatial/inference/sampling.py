@@ -89,7 +89,7 @@ def _chunk_weight(
 
 @torch.inference_mode()
 def _sample_chunk_signal(
-    model: SpatialModel,
+    model: torch.nn.Module,
     cond_chunk: torch.Tensor,
     valid_mask: torch.Tensor | None,
     z0_chunk: torch.Tensor,
@@ -429,24 +429,21 @@ def generate_spatial_signal(
             valid_mask = torch.zeros((1, chunk_frames), device=device, dtype=torch.bool)
             valid_mask[:, :segment_length] = True
 
-        sample_kwargs = {
-            "model": model,
-            "cond_chunk": cond_chunk,
-            "valid_mask": valid_mask,
-            "z0_chunk": z0_chunk,
-            "solver": solver,
-            "solver_steps": solver_steps,
-            "solver_rtol": solver_rtol,
-            "solver_atol": solver_atol,
-            "mem": mem,
-            "one_step": one_step,
-            "one_step_input": one_step_input,
-        }
-        if mix_style is not None:
-            sample_kwargs["mix_style"] = mix_style
-        if amplitude_gain is not None:
-            sample_kwargs["amplitude_gain"] = amplitude_gain
-        z1_chunk, mem = _sample_chunk_signal(**sample_kwargs)
+        z1_chunk, mem = _sample_chunk_signal(
+            model=model,
+            cond_chunk=cond_chunk,
+            valid_mask=valid_mask,
+            z0_chunk=z0_chunk,
+            solver=solver,
+            solver_steps=solver_steps,
+            solver_rtol=solver_rtol,
+            solver_atol=solver_atol,
+            mem=mem,
+            mix_style=mix_style,
+            amplitude_gain=amplitude_gain,
+            one_step=one_step,
+            one_step_input=one_step_input,
+        )
 
         pred_chunk = z1_chunk[0, :, :, :segment_length].detach().cpu().float()
 

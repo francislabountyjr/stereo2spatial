@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 import json
 import os
 import sys
+from collections.abc import Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -152,7 +153,7 @@ def _iter_results(
     signal_keys: tuple[str, ...],
     force: bool,
     workers: int,
-):
+) -> Iterator[dict[str, Any]]:
     if workers <= 1:
         for index, record in enumerate(records, start=1):
             yield _process_record(

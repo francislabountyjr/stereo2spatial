@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -32,6 +34,7 @@ from stereo2spatial.inference.export_bundle import (
     load_inference_bundle_payload,
     resolve_inference_config_path,
 )
+from stereo2spatial.inference.offline_batch import DynamicInferenceJob
 from stereo2spatial.training.config import load_config
 
 
@@ -794,7 +797,7 @@ def test_infer_cli_folder_mode_reuses_session_without_device_arg(
     def fake_run_with_session(**kwargs: object) -> dict[str, object]:
         assert "device" not in kwargs
         calls.append(kwargs)
-        output_path = Path(kwargs["output_audio_path"])
+        output_path = Path(cast(str | Path, kwargs["output_audio_path"]))
         return {
             "config_path": str(config_path),
             "input_audio_path": str(kwargs["input_audio_path"]),
@@ -902,7 +905,7 @@ def test_infer_cli_dynamic_folder_mode_dispatches_jobs(
 
     def fake_dynamic_folder(**kwargs: object) -> object:
         captured["dynamic_kwargs"] = kwargs
-        jobs = list(kwargs["jobs"])
+        jobs = list(cast(Iterable[DynamicInferenceJob], kwargs["jobs"]))
         reports = []
         for job in jobs:
             reports.append(
@@ -972,8 +975,8 @@ def test_infer_cli_dynamic_folder_mode_dispatches_jobs(
 
     infer_cli.main()
 
-    dynamic_kwargs = captured["dynamic_kwargs"]
-    jobs = list(dynamic_kwargs["jobs"])
+    dynamic_kwargs = cast(dict[str, object], captured["dynamic_kwargs"])
+    jobs = list(cast(Iterable[DynamicInferenceJob], dynamic_kwargs["jobs"]))
     assert len(jobs) == 2
     assert jobs[0].output_audio_path == output_dir / "a.flac"
     assert jobs[1].output_audio_path == output_dir / "nested" / "b.flac"
@@ -1032,7 +1035,7 @@ def test_infer_cli_dynamic_folder_mode_skips_existing_outputs(
 
     def fake_dynamic_folder(**kwargs: object) -> object:
         captured["dynamic_kwargs"] = kwargs
-        jobs = list(kwargs["jobs"])
+        jobs = list(cast(Iterable[DynamicInferenceJob], kwargs["jobs"]))
         return SimpleNamespace(
             reports=[
                 {
@@ -1073,7 +1076,8 @@ def test_infer_cli_dynamic_folder_mode_skips_existing_outputs(
 
     infer_cli.main()
 
-    jobs = list(captured["dynamic_kwargs"]["jobs"])
+    dynamic_kwargs = cast(dict[str, object], captured["dynamic_kwargs"])
+    jobs = list(cast(Iterable[DynamicInferenceJob], dynamic_kwargs["jobs"]))
     assert len(jobs) == 1
     assert jobs[0].input_audio_path == input_dir / "b.wav"
     assert jobs[0].output_audio_path == output_dir / "b.flac"
@@ -1120,7 +1124,7 @@ def test_infer_cli_force_overwrite_keeps_existing_outputs_in_work_queue(
 
     def fake_dynamic_folder(**kwargs: object) -> object:
         captured["dynamic_kwargs"] = kwargs
-        jobs = list(kwargs["jobs"])
+        jobs = list(cast(Iterable[DynamicInferenceJob], kwargs["jobs"]))
         return SimpleNamespace(
             reports=[
                 {
@@ -1162,7 +1166,8 @@ def test_infer_cli_force_overwrite_keeps_existing_outputs_in_work_queue(
 
     infer_cli.main()
 
-    jobs = list(captured["dynamic_kwargs"]["jobs"])
+    dynamic_kwargs = cast(dict[str, object], captured["dynamic_kwargs"])
+    jobs = list(cast(Iterable[DynamicInferenceJob], dynamic_kwargs["jobs"]))
     assert len(jobs) == 1
     assert jobs[0].input_audio_path == input_dir / "a.wav"
 

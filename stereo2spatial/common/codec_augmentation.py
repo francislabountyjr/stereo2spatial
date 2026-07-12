@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from io import BytesIO
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 
@@ -187,7 +187,7 @@ def _roundtrip_torchaudio(
             orig_freq=int(decoded_sample_rate),
             new_freq=int(sample_rate),
         )
-    return decoded.float()
+    return cast(torch.Tensor, decoded.float())
 
 
 def _roundtrip_ffmpeg(

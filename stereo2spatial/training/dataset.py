@@ -5,11 +5,12 @@ from __future__ import annotations
 import math
 import random
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import replace
 from multiprocessing import Value
 from os import PathLike
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.utils.data import Dataset
@@ -97,8 +98,8 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
 
     def __init__(
         self,
-        dataset_root: str | PathLike[str] | list[str | PathLike[str]],
-        manifest_path: str | PathLike[str] | list[str | PathLike[str]],
+        dataset_root: str | PathLike[str] | Sequence[str | PathLike[str]],
+        manifest_path: str | PathLike[str] | Sequence[str | PathLike[str]],
         sample_artifact_mode: str,
         segment_seconds: float,
         patch_fps: float | str,
@@ -110,7 +111,7 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
         seed: int,
         sample_exclusion_path: str
         | PathLike[str]
-        | list[str | PathLike[str]]
+        | Sequence[str | PathLike[str]]
         | None = None,
         shuffle_segments_within_song: bool = True,
         materialize_cached_signals: bool = False,
@@ -417,13 +418,13 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
 
     @staticmethod
     def _path_list(
-        value: str | PathLike[str] | list[str | PathLike[str]],
+        value: str | PathLike[str] | Sequence[str | PathLike[str]],
         name: str,
     ) -> list[Path]:
         """Normalize a path or non-empty path list."""
         if isinstance(value, (str, PathLike)):
             return [Path(value)]
-        if not isinstance(value, list) or not value:
+        if not isinstance(value, Sequence) or not value:
             raise TypeError(f"{name} must be a path or non-empty path list.")
         return [Path(item) for item in value]
 
@@ -431,8 +432,8 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
     def _coerce_dataset_paths(
         cls,
         *,
-        dataset_root: str | PathLike[str] | list[str | PathLike[str]],
-        manifest_path: str | PathLike[str] | list[str | PathLike[str]],
+        dataset_root: str | PathLike[str] | Sequence[str | PathLike[str]],
+        manifest_path: str | PathLike[str] | Sequence[str | PathLike[str]],
     ) -> tuple[list[Path], list[Path]]:
         """Normalize dataset root/manifest inputs and keep them paired."""
         roots = cls._path_list(dataset_root, "dataset_root")
@@ -940,15 +941,21 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
                 "source resample augmentation expects [C,S] waveform or [C,P,T] "
                 f"patches, got {tuple(cond_chunk.shape)}"
             )
-        degraded = torchaudio.functional.resample(
-            waveform=waveform,
-            orig_freq=source_rate,
-            new_freq=int(rate),
+        degraded = cast(
+            torch.Tensor,
+            torchaudio.functional.resample(
+                waveform=waveform,
+                orig_freq=source_rate,
+                new_freq=int(rate),
+            ),
         )
-        restored = torchaudio.functional.resample(
-            waveform=degraded,
-            orig_freq=int(rate),
-            new_freq=source_rate,
+        restored = cast(
+            torch.Tensor,
+            torchaudio.functional.resample(
+                waveform=degraded,
+                orig_freq=int(rate),
+                new_freq=source_rate,
+            ),
         )
         restored = restored.to(dtype=original_dtype)
         if not input_was_patched:
@@ -1046,6 +1053,7 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
             )
         cond_signal = signals[cond_key]
         source_lift_gain: torch.Tensor | None = None
+        lift_gain: torch.Tensor | None = None
 
         if self.sequence_mode == "full_song":
             if target_signal.dim() != 2 or cond_signal.dim() != 2:
@@ -1224,7 +1232,6 @@ class WaveformSongDataset(Dataset[dict[str, torch.Tensor]]):
                 sample["amplitude_lift_log_gain"] = log_gain_t
             return sample
 
-        lift_gain: torch.Tensor | None = None
         if target_signal.dim() != 2 or cond_signal.dim() != 2:
             full_signals = self._load_signals_from_sample(song.sample_dir)
             target_signal = full_signals["target_signal"]

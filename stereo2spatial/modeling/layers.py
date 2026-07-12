@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -98,7 +100,8 @@ class FinalOutputBlock(nn.Module):
                 nn.init.zeros_(final_linear.weight)
                 nn.init.zeros_(final_linear.bias)
             nn.init.zeros_(self.conv.weight)
-            nn.init.zeros_(self.conv.bias)
+            if self.conv.bias is not None:
+                nn.init.zeros_(self.conv.bias)
 
     def forward(
         self,
@@ -127,7 +130,7 @@ class FinalOutputBlock(nn.Module):
         )
         h = self.norm(tokens)
         h = h * (1.0 + scale) + shift
-        h = self.conv(h.transpose(1, 2)).transpose(1, 2)
+        h = cast(torch.Tensor, self.conv(h.transpose(1, 2))).transpose(1, 2)
         return h
 
 
@@ -223,7 +226,7 @@ class RotaryAttention(nn.Module):
             attn_mask=attn_mask,
             dropout_p=self.dropout if self.training else 0.0,
         )
-        return self.out_proj(self._merge_heads(out))
+        return cast(torch.Tensor, self.out_proj(self._merge_heads(out)))
 
 
 class TransformerBlock(nn.Module):

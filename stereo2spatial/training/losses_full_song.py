@@ -445,11 +445,11 @@ def _compute_full_song_flow_matching_loss(
     gan_real_chunks: list[torch.Tensor] | None = [] if collect_gan_aux else None
     gan_fake_chunks: list[torch.Tensor] | None = [] if collect_gan_aux else None
     gan_mask_chunks: list[torch.Tensor] | None = [] if collect_gan_aux else None
+    loss_metrics: dict[str, torch.Tensor] = {}
     if tbptt_windows <= 0:
         total_loss: torch.Tensor = torch.zeros(
             (), device=inputs.z1.device, dtype=torch.float32
         )
-        loss_metrics: dict[str, torch.Tensor] = {}
         for idx, start in enumerate(starts):
             end = min(start + window_frames, t_eff)
             zt_w, zc_w, vm_w, z1_w = slice_and_pad_window(
@@ -637,7 +637,6 @@ def _compute_full_song_flow_matching_loss(
     # TBPTT mode: run backward in chunks of windows to keep graph bounded.
     loss_chunk = torch.zeros((), device=inputs.z1.device, dtype=torch.float32)
     windows_in_chunk = 0
-    loss_metrics: dict[str, torch.Tensor] = {}
     for idx, start in enumerate(starts):
         end = min(start + window_frames, t_eff)
         zt_w, zc_w, vm_w, z1_w = slice_and_pad_window(

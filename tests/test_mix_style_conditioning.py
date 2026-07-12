@@ -604,10 +604,12 @@ def test_spatial_dit_mix_style_changes_output() -> None:
         num_memory_tokens=0,
         mix_style_dim=len(MIX_STYLE_NAMES),
     )
-    assert model.mix_style_mlp is not None
+    assert isinstance(model.mix_style_mlp, torch.nn.Sequential)
+    output_layer = model.mix_style_mlp[-1]
+    assert isinstance(output_layer, torch.nn.Linear)
     with torch.no_grad():
-        model.mix_style_mlp[-1].weight.fill_(0.01)
-        model.mix_style_mlp[-1].bias.fill_(0.05)
+        output_layer.weight.fill_(0.01)
+        output_layer.bias.fill_(0.05)
     zt = torch.randn(1, 2, 4, 3)
     zc = torch.randn(1, 2, 4, 3)
     mask = torch.ones(1, 3, dtype=torch.bool)

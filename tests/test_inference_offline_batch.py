@@ -515,7 +515,7 @@ def test_dynamic_window_stitching_accumulates_in_float32() -> None:
 
 def test_dynamic_folder_inference_runs_jobs_with_batched_model_queries(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = _RecordingCleanPredictor()
     session = _session(tmp_path, model)
@@ -614,7 +614,7 @@ def test_dynamic_folder_inference_accepts_hyphenated_timestep_major(
 
 def test_dynamic_folder_inference_supports_legacy_vae_codec_boundary(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = _RecordingCleanPredictor()
     session = _legacy_session(tmp_path, model)
@@ -751,7 +751,7 @@ def test_legacy_dynamic_folder_inference_requires_48khz(tmp_path: Path) -> None:
 
 def test_dynamic_folder_inference_removes_failed_temp_output(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = _RecordingCleanPredictor()
     session = _session(tmp_path, model)

@@ -463,7 +463,7 @@ class _PreparedFileRequest:
     window_frames: int
     overlap_seconds: float
     overlap_frames: int
-    solver: str
+    solver: ResolvedSolverName
     solver_steps: int
     solver_rtol: float
     solver_atol: float
@@ -523,7 +523,10 @@ def _init_model_memory(
         init_memory = getattr(model._orig_mod, "init_memory", None)
     if init_memory is None:
         return None
-    return init_memory(batch_size=1, device=device, dtype=dtype)
+    memory = init_memory(batch_size=1, device=device, dtype=dtype)
+    if memory is not None and not isinstance(memory, torch.Tensor):
+        raise TypeError("model.init_memory() must return a Tensor or None")
+    return memory
 
 
 def _prepare_dynamic_file_request(

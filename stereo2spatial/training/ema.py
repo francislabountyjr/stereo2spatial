@@ -26,7 +26,9 @@ def _persistent_named_buffers(model: torch.nn.Module) -> dict[str, torch.Tensor]
     """Return buffers that are part of the model state dict, excluding runtime caches."""
     buffers: dict[str, torch.Tensor] = {}
     for module_prefix, module in model.named_modules():
-        non_persistent = getattr(module, "_non_persistent_buffers_set", set())
+        non_persistent: set[str] = getattr(
+            module, "_non_persistent_buffers_set", set()
+        )
         for name, buffer in module.named_buffers(recurse=False):
             if name in non_persistent:
                 continue

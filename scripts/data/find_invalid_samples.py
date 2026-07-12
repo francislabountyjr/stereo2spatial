@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import torch
 import soundfile as sf
+import torch
 
 MANIFEST_FILENAME = "manifest.jsonl"
 SAMPLE_BUNDLE_FILENAME = "sample_bundle.pt"
@@ -65,7 +65,10 @@ def _read_metadata(sample_dir: Path) -> dict[str, Any]:
     if not metadata_path.exists():
         return {}
     try:
-        return json.loads(metadata_path.read_text(encoding="utf-8"))
+        payload: object = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return {}
+        return {str(key): value for key, value in payload.items()}
     except (OSError, json.JSONDecodeError):
         return {}
 

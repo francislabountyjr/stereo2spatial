@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 import json
+from collections.abc import Sequence
+from os import PathLike
 from pathlib import Path
 from typing import Any
 
@@ -317,20 +319,20 @@ def _filter_songs_by_min_source_rms(
 
 
 def _path_list_or_none(
-    value: str | Path | list[str | Path] | None,
+    value: str | PathLike[str] | Sequence[str | PathLike[str]] | None,
 ) -> list[Path]:
     """Normalize an optional path or path list."""
     if value is None:
         return []
-    if isinstance(value, (str, Path)):
+    if isinstance(value, (str, PathLike)):
         return [Path(value)]
-    if not isinstance(value, list):
+    if not isinstance(value, Sequence):
         raise TypeError("sample exclusion path must be a path or list of paths")
     return [Path(item) for item in value]
 
 
 def _load_sample_exclusion_keys(
-    paths: str | Path | list[str | Path] | None,
+    paths: str | PathLike[str] | Sequence[str | PathLike[str]] | None,
 ) -> tuple[set[str], set[str]]:
     """Load excluded stream hashes and sample dirs from JSON, CSV, or text files."""
     stream_hashes: set[str] = set()
@@ -396,7 +398,10 @@ def _load_sample_exclusion_keys(
 def _filter_songs_by_sample_exclusion(
     songs: list[SongRecord],
     *,
-    sample_exclusion_path: str | Path | list[str | Path] | None,
+    sample_exclusion_path: str
+    | PathLike[str]
+    | Sequence[str | PathLike[str]]
+    | None,
 ) -> tuple[list[SongRecord], int]:
     """Drop songs whose stream hash or sample directory is listed for exclusion."""
     stream_hashes, sample_dirs = _load_sample_exclusion_keys(sample_exclusion_path)

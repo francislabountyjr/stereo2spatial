@@ -127,7 +127,12 @@ def _predict_clean(
     amplitude_gain: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run one clean-prediction model call with optional recurrent memory."""
-    kwargs = {"zt": zt, "t": t, "z_cond": z_cond, "valid_mask": valid_mask}
+    kwargs: dict[str, object] = {
+        "zt": zt,
+        "t": t,
+        "z_cond": z_cond,
+        "valid_mask": valid_mask,
+    }
     if mix_style is not None:
         kwargs["mix_style"] = mix_style
     if mix_style_mask is not None:
@@ -168,7 +173,12 @@ def _predict_clean_probe(
     (for example, Heun/UniPC) where only accepted states should
     advance memory.
     """
-    kwargs = {"zt": zt, "t": t, "z_cond": z_cond, "valid_mask": valid_mask}
+    kwargs: dict[str, object] = {
+        "zt": zt,
+        "t": t,
+        "z_cond": z_cond,
+        "valid_mask": valid_mask,
+    }
     if mix_style is not None:
         kwargs["mix_style"] = mix_style
     if mix_style_mask is not None:
