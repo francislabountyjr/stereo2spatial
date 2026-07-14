@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -18,6 +19,7 @@ from stereo2spatial.inference.sampling import generate_spatial_signal
 from stereo2spatial.inference.timestep_sampling import (
     generate_spatial_signal_timestep_major,
 )
+from stereo2spatial.modeling import SpatialModel
 
 
 class _RecordingCleanPredictor(torch.nn.Module):
@@ -179,7 +181,7 @@ def _session(tmp_path: Path, model: torch.nn.Module) -> InferenceSession:
     )
     return InferenceSession(
         config=config,  # type: ignore[arg-type]
-        model=model,
+        model=cast(SpatialModel, model),
         checkpoint_path=tmp_path / "checkpoint",
         run_device=torch.device("cpu"),
         used_weights_source="student",
@@ -321,7 +323,7 @@ def test_dynamic_windowing_matches_sequential_full_song_noise(
     seed = 1234
 
     sequential = generate_spatial_signal(
-        model=model,
+        model=cast(SpatialModel, model),
         cond_signal=cond,
         chunk_frames=10,
         overlap_frames=3,
@@ -362,7 +364,7 @@ def test_dynamic_timestep_major_matches_reference_sampler(solver: str) -> None:
     seed = 1234
     reference_model = _MemorySweepPredictor()
     reference = generate_spatial_signal_timestep_major(
-        model=reference_model,
+        model=cast(SpatialModel, reference_model),
         cond_signal=cond,
         chunk_frames=10,
         overlap_frames=3,

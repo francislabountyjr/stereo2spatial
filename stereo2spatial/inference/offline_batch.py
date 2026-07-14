@@ -1272,7 +1272,7 @@ def run_dynamic_folder_inference(
     decode_chunk_size_frames: int = 2048,
     decode_overlap_frames: int = 256,
     disable_chunked_decode: bool = False,
-    sampling_order: SamplingOrder = "timestep_major",
+    sampling_order: str = "timestep_major",
 ) -> DynamicFolderInferenceResult:
     """Run dynamic-batched inference for a collection of filesystem jobs."""
     resolved_sampling_order = _normalize_sampling_order(sampling_order)
