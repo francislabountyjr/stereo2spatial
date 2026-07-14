@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import torch
 
@@ -127,7 +128,10 @@ def load_safetensors_state_dict_file(
             "Missing dependency: safetensors. Install with `pip install safetensors`."
         ) from error
 
-    return load_safetensors_file(str(checkpoint_path), device="cpu")
+    return cast(
+        dict[str, torch.Tensor],
+        load_safetensors_file(str(checkpoint_path), device="cpu"),
+    )
 
 
 def load_safetensors_state_dict_from_dir(

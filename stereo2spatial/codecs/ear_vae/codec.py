@@ -7,15 +7,15 @@ import json
 import math
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeAlias, cast
 
 import torch
 
 from .runtime import _empty_cache, get_gpu_memory_gb
 
-DeviceLike = str | torch.device
-LatentsLike = torch.Tensor | Sequence[torch.Tensor]
-MonoReductionMode = Literal["mean", "left", "right"]
+DeviceLike: TypeAlias = str | torch.device
+LatentsLike: TypeAlias = torch.Tensor | Sequence[torch.Tensor]
+MonoReductionMode: TypeAlias = Literal["mean", "left", "right"]
 
 DEFAULT_ENCODE_CHUNK_SEC_LOW_VRAM = 15.0
 DEFAULT_ENCODE_CHUNK_SEC_HIGH_VRAM = 30.0

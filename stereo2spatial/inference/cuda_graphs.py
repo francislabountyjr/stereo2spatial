@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeAlias
 
 import torch
 
-TensorTree = torch.Tensor | dict[str, "TensorTree"] | list["TensorTree"] | tuple["TensorTree", ...] | None
+TensorTree: TypeAlias = (
+    torch.Tensor
+    | dict[str, "TensorTree"]
+    | list["TensorTree"]
+    | tuple["TensorTree", ...]
+    | None
+)
 
 
 def _tensor_tree_key(value: Any) -> Any:

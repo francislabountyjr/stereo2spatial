@@ -321,7 +321,7 @@ def test_dynamic_windowing_matches_sequential_full_song_noise(
     seed = 1234
 
     sequential = generate_spatial_signal(
-        model=model,  # type: ignore[arg-type]
+        model=model,
         cond_signal=cond,
         chunk_frames=10,
         overlap_frames=3,
@@ -362,7 +362,7 @@ def test_dynamic_timestep_major_matches_reference_sampler(solver: str) -> None:
     seed = 1234
     reference_model = _MemorySweepPredictor()
     reference = generate_spatial_signal_timestep_major(
-        model=reference_model,  # type: ignore[arg-type]
+        model=reference_model,
         cond_signal=cond,
         chunk_frames=10,
         overlap_frames=3,
@@ -604,7 +604,7 @@ def test_dynamic_folder_inference_accepts_hyphenated_timestep_major(
         solver_atol=1.0e-5,
         seed=123,
         normalize_peak=False,
-        sampling_order="timestep-major",  # type: ignore[arg-type]
+        sampling_order="timestep-major",
     )
 
     assert result.reports == []

@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from typing import TypeAlias
 
 import torch
 
-DeviceLike = str | torch.device
+DeviceLike: TypeAlias = str | torch.device
 
 LOGGER = logging.getLogger(__name__)
 DEBUG_MAX_CUDA_VRAM_ENV = "MAX_CUDA_VRAM"
@@ -17,7 +18,7 @@ DEBUG_MAX_CUDA_VRAM_ENV = "MAX_CUDA_VRAM"
 def _device_type(device: DeviceLike) -> str:
     """Return normalized device backend name (for example ``cuda`` or ``cpu``)."""
     if isinstance(device, torch.device):
-        return device.type
+        return str(device.type)
     return str(device).split(":")[0]
 
 
@@ -61,9 +62,9 @@ def get_gpu_memory_gb() -> float:
 
     try:
         if torch.cuda.is_available():
-            return torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            return float(torch.cuda.get_device_properties(0).total_memory) / (1024**3)
         if hasattr(torch, "xpu") and torch.xpu.is_available():
-            return torch.xpu.get_device_properties(0).total_memory / (1024**3)
+            return float(torch.xpu.get_device_properties(0).total_memory) / (1024**3)
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             try:
                 result = subprocess.run(
