@@ -383,3 +383,17 @@ quality against float32 using the same seed and solver configuration.
 Additional design detail is available in
 [docs/architecture.md](docs/architecture.md), and operational script guidance is
 in [scripts/README.md](scripts/README.md).
+
+## License
+
+stereo2spatial is available under the [Apache License 2.0](LICENSE).
+
+## Acknowledgements
+
+Compute for the stereo2spatial-v2 training run was provided by SERP, which
+supplied two NVIDIA RTX A6000 GPUs for approximately 20 days of training: about
+10 days for Stage 1 and 10 days for Stage 2. Special thanks to
+[SERP Apps](https://github.com/serpapps),
+[SERP AI](https://github.com/serp-ai), and
+[Devin Schumacher](https://github.com/devinschumacher) for supporting the
+project.

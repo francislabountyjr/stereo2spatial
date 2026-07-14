@@ -26,6 +26,7 @@ _parallel_preprocess_bench/
 _parallel_preprocess/
 runs/
 checkpoints/
+exports/
 dataset_paths.csv
 dataset_paths copy.csv
 atmos_filter_report.csv

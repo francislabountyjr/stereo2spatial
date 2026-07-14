@@ -1,19 +1,17 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "stereo2spatial"
-version = "0.1.0"
+version = "1.0.0"
 description = "Stereo/mono to spatial audio training and inference for waveform and EAR-VAE latent models"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
   { name = "stereo2spatial" }
-]
-classifiers = [
-  "License :: OSI Approved :: MIT License"
 ]
 dependencies = [
   "accelerate>=0.33",
